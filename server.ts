@@ -57,7 +57,10 @@ app.use(cookieParser());
   }
 
   async function checkImageSafety(base64Data: string): Promise<{ safe: boolean; reason?: string }> {
-    if (!process.env.GEMINI_API_KEY) return { safe: true };
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn('Safety Check Skipping: GEMINI_API_KEY is not set.');
+      return { safe: true };
+    }
     try {
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
       const [header, data] = base64Data.split(',');
@@ -71,9 +74,12 @@ app.use(cookieParser());
       const text = result.response.text().trim();
       if (text.toUpperCase().startsWith('AMAN')) return { safe: true };
       return { safe: false, reason: text.replace('TOLAK:', '').replace('REJECT:', '').trim() };
-    } catch (error) {
-      console.error('Safety Check Error:', error);
-      return { safe: true }; // Fallback
+    } catch (error: any) {
+      console.error('Safety Check Error:', error.message);
+      if (error.message?.includes('API key not valid')) {
+        console.error('CRITICAL: GEMINI_API_KEY is invalid. Please check your AI Studio settings.');
+      }
+      return { safe: true }; // Fallback to allow if AI check fails
     }
   }
 
@@ -112,8 +118,11 @@ app.use(cookieParser());
       });
 
       return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`;
-    } catch (error) {
-      console.error('Drive Upload Error:', error);
+    } catch (error: any) {
+      console.error('Drive Upload Error:', error.message);
+      if (error.message?.includes('Google Drive API has not been used')) {
+        console.error('CRITICAL: Google Drive API is disabled. Please enable it in the Google Cloud Console: https://console.cloud.google.com/apis/library/drive.googleapis.com');
+      }
       return '';
     }
   }
@@ -668,7 +677,8 @@ app.use(cookieParser());
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    // Better path resolution for production
+    const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
