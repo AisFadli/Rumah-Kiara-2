@@ -8,6 +8,7 @@ import bcrypt from 'bcryptjs';
 import cookieParser from 'cookie-parser';
 import { google } from 'googleapis';
 import { Readable } from 'stream';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,6 +44,38 @@ app.use(cookieParser());
   });
 
   const drive = google.drive({ version: 'v3', auth: serviceAccountAuth as any });
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+  async function deleteFromDrive(imageUrl: string) {
+    if (!imageUrl || !imageUrl.includes('id=')) return;
+    try {
+      const fileId = imageUrl.split('id=')[1].split('&')[0];
+      await drive.files.delete({ fileId });
+    } catch (error) {
+      console.error('Drive Delete Error:', error);
+    }
+  }
+
+  async function checkImageSafety(base64Data: string): Promise<{ safe: boolean; reason?: string }> {
+    if (!process.env.GEMINI_API_KEY) return { safe: true };
+    try {
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const [header, data] = base64Data.split(',');
+      const mime = header.match(/:(.*?);/)?.[1] || 'image/jpeg';
+      
+      const prompt = "Berperanlah sebagai moderator komunitas. Analisis gambar ini. Apakah layak dipublish di portal warga (family-friendly)? Tolak jika ada kekerasan, ketidaksopanan, konten dewasa, atau hal berbahaya. Jawab hanya: 'AMAN' atau 'TOLAK: [alasan singkat dalam Bahasa Indonesia]'.";
+      const result = await model.generateContent([
+        prompt,
+        { inlineData: { data, mimeType: mime } }
+      ]);
+      const text = result.response.text().trim();
+      if (text.toUpperCase().startsWith('AMAN')) return { safe: true };
+      return { safe: false, reason: text.replace('TOLAK:', '').replace('REJECT:', '').trim() };
+    } catch (error) {
+      console.error('Safety Check Error:', error);
+      return { safe: true }; // Fallback
+    }
+  }
 
   async function uploadToDrive(base64Data: string, fileName: string) {
     if (!base64Data || !base64Data.startsWith('data:')) return base64Data;
@@ -84,6 +117,8 @@ app.use(cookieParser());
       return '';
     }
   }
+
+
 
   const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID || '', serviceAccountAuth);
 
@@ -213,26 +248,46 @@ app.use(cookieParser());
     });
   });
 
-  // Feed / Posts
   app.get('/api/posts', async (req, res) => {
     try {
       const sheet = await getSheet('Posts');
       const rows = await sheet.getRows();
-      res.json(rows.map(r => ({
+      let posts = rows.map(r => ({
         id: r.rowNumber,
         author: r.get('author'),
         content: r.get('content'),
         imageUrl: r.get('imageUrl'),
         likes: parseInt(r.get('likes') || '0'),
-        createdAt: r.get('createdAt')
-      })).reverse());
+        createdAt: r.get('createdAt'),
+        isPublic: r.get('isPublic') === 'TRUE' || r.get('isPublic') === undefined || r.get('isPublic') === ''
+      })).reverse();
+
+      // Robust auth check for public/resident visibility
+      const token = req.cookies.token;
+      let isResident = false;
+      if (token) {
+        try {
+          jwt.verify(token, process.env.JWT_SECRET || 'secret');
+          isResident = true;
+        } catch (e) {}
+      }
+
+      if (!isResident) {
+        posts = posts.filter(p => p.isPublic);
+      }
+
+      res.json(posts);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   app.post('/api/posts', authenticateToken, async (req: any, res) => {
-    let { content, imageUrl } = req.body;
+    let { content, imageUrl, isPublic } = req.body;
     try {
       if (imageUrl && imageUrl.startsWith('data:')) {
+        const safety = await checkImageSafety(imageUrl);
+        if (!safety.safe) {
+          return res.status(400).json({ error: `Konten ditolak AI: ${safety.reason}` });
+        }
         imageUrl = await uploadToDrive(imageUrl, `post_${Date.now()}.jpg`);
       }
       
@@ -242,9 +297,28 @@ app.use(cookieParser());
         content,
         imageUrl: imageUrl || '',
         likes: 0,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        isPublic: isPublic ? 'TRUE' : 'FALSE'
       });
       res.json({ success: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete('/api/posts/:id', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const sheet = await getSheet('Posts');
+      const rows = await sheet.getRows();
+      // Find by rowNumber
+      const row = rows.find(r => r.rowNumber === parseInt(req.params.id));
+      if (row) {
+        const img = row.get('imageUrl');
+        if (img) await deleteFromDrive(img);
+        await row.delete();
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ error: 'Post not found' });
+      }
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -280,12 +354,12 @@ app.use(cookieParser());
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // Activities
   app.get('/api/activities', async (req, res) => {
     try {
       const sheet = await getSheet('Activities');
       const rows = await sheet.getRows();
       res.json(rows.map(r => ({
+        id: r.rowNumber,
         title: r.get('title'),
         description: r.get('description'),
         date: r.get('date'),
@@ -310,6 +384,21 @@ app.use(cookieParser());
         phone
       });
       res.json({ success: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete('/api/activities/:id', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const sheet = await getSheet('Activities');
+      const rows = await sheet.getRows();
+      const row = rows.find(r => r.rowNumber === parseInt(req.params.id));
+      if (row) {
+        await row.delete();
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ error: 'Activity not found' });
+      }
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
