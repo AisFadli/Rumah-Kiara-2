@@ -250,11 +250,21 @@ app.use(cookieParser());
 
   app.get('/api/posts', async (req, res) => {
     try {
-      const sheet = await getSheet('Posts');
-      const rows = await sheet.getRows();
-      let posts = rows.map(r => ({
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 5;
+      
+      const postsSheet = await getSheet('Posts');
+      const postsRows = await postsSheet.getRows();
+      
+      const usersSheet = await getSheet('Users');
+      const usersRows = await usersSheet.getRows();
+      const userMap = new Map();
+      usersRows.forEach(r => userMap.set(r.get('name'), r.get('avatar')));
+
+      let posts = postsRows.map(r => ({
         id: r.rowNumber,
         author: r.get('author'),
+        authorAvatar: userMap.get(r.get('author')) || '',
         content: r.get('content'),
         imageUrl: r.get('imageUrl'),
         likes: parseInt(r.get('likes') || '0'),
@@ -276,7 +286,15 @@ app.use(cookieParser());
         posts = posts.filter(p => p.isPublic);
       }
 
-      res.json(posts);
+      const total = posts.length;
+      const paginatedPosts = posts.slice((page - 1) * limit, page * limit);
+
+      res.json({
+        posts: paginatedPosts,
+        total,
+        page,
+        totalPages: Math.ceil(total / limit)
+      });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -325,32 +343,96 @@ app.use(cookieParser());
   // Financials
   app.get('/api/financials', authenticateToken, async (req, res) => {
     try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const showPending = req.query.pending === 'true' && (req as any).user.role === 'admin';
+
       const sheet = await getSheet('Financials');
       const rows = await sheet.getRows();
-      res.json(rows.map(r => ({
-        type: r.get('type'), // income/expense
-        category: r.get('category'),
-        amount: parseFloat(r.get('amount')),
-        date: r.get('date'),
-        description: r.get('description'),
-        addedBy: r.get('addedBy')
-      })).reverse());
+      
+      const data = rows
+        .map(r => ({
+          id: r.rowNumber,
+          type: r.get('type'), // income/expense
+          category: r.get('category'),
+          amount: parseFloat(r.get('amount')),
+          date: r.get('date'),
+          description: r.get('description'),
+          addedBy: r.get('addedBy'),
+          attachment: r.get('attachment') || '',
+          status: r.get('status') || 'approved'
+        }))
+        .filter(f => showPending ? f.status === 'pending' : f.status === 'approved')
+        .reverse();
+
+      const total = data.length;
+      const paginated = data.slice((page - 1) * limit, page * limit);
+
+      res.json({
+        financials: paginated,
+        total,
+        page,
+        totalPages: Math.ceil(total / limit)
+      });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   app.post('/api/financials', authenticateToken, async (req: any, res) => {
-    const { type, category, amount, description, date } = req.body;
+    let { type, category, amount, description, date, attachment } = req.body;
     try {
       const sheet = await getSheet('Financials');
+      const isPending = req.user.role === 'resident';
+
+      if (attachment && attachment.startsWith('data:')) {
+        const safety = await checkImageSafety(attachment);
+        if (!safety.safe) return res.status(400).json({ error: `Bukti ditolak: ${safety.reason}` });
+        attachment = await uploadToDrive(attachment, `receipt_${Date.now()}.jpg`);
+      }
+
       await sheet.addRow({
         type,
         category,
         amount,
         description,
         date: date || new Date().toISOString().split('T')[0],
-        addedBy: req.user.name
+        addedBy: req.user.name,
+        attachment: attachment || '',
+        status: isPending ? 'pending' : 'approved'
       });
-      res.json({ success: true });
+      res.json({ success: true, pending: isPending });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.put('/api/admin/financials/:id/approve', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const sheet = await getSheet('Financials');
+      const rows = await sheet.getRows();
+      const row = rows.find(r => r.rowNumber === parseInt(req.params.id));
+      if (row) {
+        row.set('status', 'approved');
+        await row.save();
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ error: 'Data not found' });
+      }
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete('/api/admin/financials/:id', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const sheet = await getSheet('Financials');
+      const rows = await sheet.getRows();
+      const row = rows.find(r => r.rowNumber === parseInt(req.params.id));
+      if (row) {
+        const att = row.get('attachment');
+        if (att) await deleteFromDrive(att);
+        await row.delete();
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ error: 'Data not found' });
+      }
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -447,6 +529,81 @@ app.use(cookieParser());
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // Resident Directory
+  app.get('/api/residents', async (req, res) => {
+    try {
+      const sheet = await getSheet('Users');
+      const rows = await sheet.getRows();
+      res.json(rows
+        .filter(r => r.get('status') === 'approved')
+        .map(r => ({
+          name: r.get('name'),
+          houseNumber: r.get('houseNumber'),
+          avatar: r.get('avatar') || '',
+          role: r.get('role')
+        })));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Profile Management
+  app.get('/api/profile', authenticateToken, async (req: any, res) => {
+    try {
+      const sheet = await getSheet('Users');
+      const rows = await sheet.getRows();
+      const userRow = rows.find(r => r.get('username') === req.user.username);
+      if (!userRow) return res.status(404).json({ error: 'User not found' });
+      
+      res.json({
+        username: userRow.get('username'),
+        name: userRow.get('name'),
+        houseNumber: userRow.get('houseNumber'),
+        avatar: userRow.get('avatar') || '',
+        role: userRow.get('role')
+      });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.put('/api/profile', authenticateToken, async (req: any, res) => {
+    let { name, houseNumber, avatar, password } = req.body;
+    try {
+      const sheet = await getSheet('Users');
+      const rows = await sheet.getRows();
+      const userRow = rows.find(r => r.get('username') === req.user.username);
+      if (!userRow) return res.status(404).json({ error: 'User not found' });
+
+      if (avatar && avatar.startsWith('data:')) {
+        // Delete old avatar if it exists
+        const oldAvatar = userRow.get('avatar');
+        if (oldAvatar) await deleteFromDrive(oldAvatar);
+        
+        const safety = await checkImageSafety(avatar);
+        if (!safety.safe) return res.status(400).json({ error: `Avatar ditolak: ${safety.reason}` });
+        
+        avatar = await uploadToDrive(avatar, `avatar_${req.user.username}.jpg`);
+      }
+
+      if (name) userRow.set('name', name);
+      if (houseNumber) userRow.set('houseNumber', houseNumber);
+      if (avatar) userRow.set('avatar', avatar);
+      if (password) {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        userRow.set('password', hashedPassword);
+      }
+
+      await userRow.save();
+      
+      // Update token if name changed
+      const token = jwt.sign({ 
+        username: userRow.get('username'),
+        name: userRow.get('name'),
+        role: userRow.get('role') 
+      }, process.env.JWT_SECRET || 'secret');
+
+      res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none' });
+      res.json({ success: true, name: userRow.get('name'), avatar: userRow.get('avatar') });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // Admin: Get Users
   app.get('/api/admin/users', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
@@ -459,6 +616,7 @@ app.use(cookieParser());
         houseNumber: r.get('houseNumber'),
         status: r.get('status'),
         role: r.get('role'),
+        avatar: r.get('avatar') || '',
         createdAt: r.get('createdAt')
       })));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
