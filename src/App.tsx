@@ -21,7 +21,10 @@ import {
   Info,
   Menu,
   X,
-  Lock
+  Lock,
+  Phone,
+  User as UserIcon,
+  Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -46,6 +49,8 @@ interface Activity {
   description: string;
   date: string;
   location: string;
+  pic?: string;
+  phone?: string;
 }
 
 interface Financial {
@@ -221,7 +226,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 py-8">
         <AnimatePresence mode="wait">
           {activeTab === 'home' && <HomeContent key="home" activities={activities} posts={posts} residentCount={residentCount} />}
-          {activeTab === 'activities' && <ActivitiesContent key="activities" activities={activities} />}
+          {activeTab === 'activities' && <ActivitiesContent key="activities" activities={activities} user={user} setActivities={setActivities} />}
           {activeTab === 'feed' && <FeedContent key="feed" posts={posts} user={user} setPosts={setPosts} />}
           {activeTab === 'login' && <LoginContent key="login" setUser={setUser} setActiveTab={setActiveTab} />}
           {activeTab === 'dashboard' && <DashboardContent key="dashboard" user={user} financials={financials} setFinancials={setFinancials} />}
@@ -302,34 +307,149 @@ const HomeContent = ({ activities, posts, residentCount }: { activities: Activit
   </motion.div>
 );
 
-const ActivitiesContent = ({ activities }: { activities: Activity[]; key?: string }) => (
-  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="max-w-3xl mx-auto space-y-8">
-    <div className="text-center space-y-4">
-      <h2 className="text-3xl font-bold">Kegiatan & Acara</h2>
-      <p className="text-slate-600">Jadwal kegiatan rutin dan khusus di cluster Rumah Kiara 2.</p>
-    </div>
-    <div className="space-y-6">
-      {activities.map((act, i) => (
-        <div key={i} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-xl flex gap-6 items-start">
-          <div className="bg-brand-primary/10 text-brand-primary p-4 rounded-2xl shrink-0">
-            <Calendar className="w-8 h-8" />
-          </div>
-          <div className="space-y-2">
-            <div className="flex justify-between items-start">
-              <h3 className="text-xl font-bold">{act.title}</h3>
-              <span className="text-xs font-bold px-3 py-1 bg-slate-100 rounded-full">{act.date}</span>
+const ActivitiesContent = ({ activities, user, setActivities }: { activities: Activity[]; user: User | null; setActivities: any; key?: string }) => {
+  const [showAdd, setShowAdd] = useState(false);
+  const [formData, setFormData] = useState({ title: '', description: '', date: '', location: '', pic: '', phone: '' });
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSaving(true);
+    try {
+      await fetch('/api/activities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData)
+      });
+      setFormData({ title: '', description: '', date: '', location: '', pic: '', phone: '' });
+      setShowAdd(false);
+      const res = await fetch('/api/activities');
+      setActivities(await res.json());
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="max-w-3xl mx-auto space-y-8">
+      <div className="text-center space-y-4">
+        <h2 className="text-3xl font-bold">Kegiatan & Acara</h2>
+        <p className="text-slate-600">Jadwal kegiatan rutin dan khusus di cluster Rumah Kiara 2.</p>
+        {user?.role === 'admin' && (
+          <button 
+            onClick={() => setShowAdd(!showAdd)}
+            className="bg-slate-900 text-white px-6 py-2 rounded-xl font-bold flex items-center gap-2 mx-auto"
+          >
+            <Plus className="w-4 h-4" />
+            {showAdd ? 'Tutup Form' : 'Tambah Kegiatan'}
+          </button>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {showAdd && (
+          <motion.div 
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden"
+          >
+            <form onSubmit={handleAdd} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-xl space-y-4">
+              <div className="grid md:grid-cols-2 gap-4">
+                <input 
+                  placeholder="Nama Kegiatan" 
+                  className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
+                  value={formData.title} 
+                  onChange={e => setFormData({...formData, title: e.target.value})} 
+                  required 
+                />
+                <input 
+                  type="date" 
+                  className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
+                  value={formData.date} 
+                  onChange={e => setFormData({...formData, date: e.target.value})} 
+                  required 
+                />
+              </div>
+              <input 
+                placeholder="Lokasi" 
+                className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
+                value={formData.location} 
+                onChange={e => setFormData({...formData, location: e.target.value})} 
+                required 
+              />
+              <div className="grid md:grid-cols-2 gap-4">
+                <input 
+                  placeholder="PIC (Penanggung Jawab)" 
+                  className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
+                  value={formData.pic} 
+                  onChange={e => setFormData({...formData, pic: e.target.value})} 
+                />
+                <input 
+                  placeholder="No. Telp PIC" 
+                  className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
+                  value={formData.phone} 
+                  onChange={e => setFormData({...formData, phone: e.target.value})} 
+                />
+              </div>
+              <textarea 
+                placeholder="Keterangan Kegiatan" 
+                className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full h-32 resize-none" 
+                value={formData.description} 
+                onChange={e => setFormData({...formData, description: e.target.value})} 
+              />
+              <button 
+                type="submit" 
+                disabled={isSaving}
+                className="w-full bg-brand-primary text-white py-4 rounded-2xl font-bold hover:bg-brand-secondary transition-colors"
+              >
+                {isSaving ? 'Menyimpan...' : 'Simpan Kegiatan'}
+              </button>
+            </form>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="space-y-6">
+        {activities.map((act, i) => (
+          <div key={i} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-xl flex gap-6 items-start">
+            <div className="bg-brand-primary/10 text-brand-primary p-4 rounded-2xl shrink-0">
+              <Calendar className="w-8 h-8" />
             </div>
-            <p className="text-slate-500">{act.description}</p>
-            <div className="pt-4 flex items-center gap-2 text-sm text-slate-400">
-              <Info className="w-4 h-4" />
-              <span>Lokasi: {act.location}</span>
+            <div className="space-y-2 flex-1">
+              <div className="flex justify-between items-start">
+                <h3 className="text-xl font-bold">{act.title}</h3>
+                <span className="text-xs font-bold px-3 py-1 bg-slate-100 rounded-full">{act.date}</span>
+              </div>
+              <p className="text-slate-500">{act.description}</p>
+              
+              <div className="pt-4 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-50 mt-4">
+                <div className="flex items-center gap-2 text-sm text-slate-500">
+                  <Info className="w-4 h-4 text-slate-400" />
+                  <span>Lokasi: {act.location}</span>
+                </div>
+                {act.pic && (
+                  <div className="flex items-center gap-2 text-sm text-slate-500">
+                    <UserIcon className="w-4 h-4 text-slate-400" />
+                    <span>PIC: {act.pic}</span>
+                  </div>
+                )}
+                {act.phone && (
+                  <div className="flex items-center gap-2 text-sm text-slate-500">
+                    <Phone className="w-4 h-4 text-slate-400" />
+                    <span>Telp: {act.phone}</span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      ))}
-    </div>
-  </motion.div>
-);
+        ))}
+      </div>
+    </motion.div>
+  );
+};
 
 const PostCard = ({ post, user, key }: { post: Post; user: User | null; key?: any }) => {
   const [likes, setLikes] = useState(post.likes);
@@ -447,21 +567,42 @@ const FeedContent = ({ posts, user, setPosts }: { posts: Post[]; user: User | nu
   const [newContent, setNewContent] = useState('');
   const [imageUrl, setImageUrl] = useState('');
   const [isPosting, setIsPosting] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 10 * 1024 * 1024) {
+        alert("File terlalu besar. Maksimal 10MB.");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImageUrl(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
 
   const handlePost = async () => {
     if (!newContent.trim()) return;
     setIsPosting(true);
-    await fetch('/api/posts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: newContent, imageUrl })
-    });
-    setNewContent('');
-    setImageUrl('');
-    const res = await fetch('/api/posts');
-    const data = await res.json();
-    if (Array.isArray(data)) setPosts(data);
-    setIsPosting(false);
+    try {
+      await fetch('/api/posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: newContent, imageUrl })
+      });
+      setNewContent('');
+      setImageUrl('');
+      const res = await fetch('/api/posts');
+      const data = await res.json();
+      if (Array.isArray(data)) setPosts(data);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsPosting(false);
+    }
   };
 
   return (
@@ -469,32 +610,63 @@ const FeedContent = ({ posts, user, setPosts }: { posts: Post[]; user: User | nu
       {user && (
         <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-lg space-y-4">
           <div className="flex gap-4">
-            <div className="w-12 h-12 rounded-full bg-brand-primary text-white flex items-center justify-center font-bold">
+            <div className="w-12 h-12 rounded-full bg-brand-primary text-white flex items-center justify-center font-bold shrink-0">
               {user.name[0]}
             </div>
             <textarea
               placeholder="Bagikan momen atau info cluster..."
-              className="w-full p-4 bg-slate-50 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
+              className="w-full p-4 bg-slate-50 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-primary/20 min-h-[100px]"
               rows={3}
               value={newContent}
               onChange={(e) => setNewContent(e.target.value)}
             />
           </div>
-          <div className="flex items-center justify-between">
-            <input 
-              type="text" 
-              placeholder="Image URL (optional)" 
-              className="text-sm p-2 rounded-lg bg-slate-50 border border-slate-100"
-              value={imageUrl}
-              onChange={(e) => setImageUrl(e.target.value)}
-            />
+
+          {imageUrl && (
+            <div className="relative w-full aspect-video rounded-2xl overflow-hidden border border-slate-100">
+              <img src={imageUrl} alt="Preview" className="w-full h-full object-cover" />
+              <button 
+                onClick={() => setImageUrl('')}
+                className="absolute top-2 right-2 bg-black/60 text-white p-1 rounded-full hover:bg-black/80"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-2">
+            <div className="flex gap-2">
+              <input 
+                type="file" 
+                accept="image/*" 
+                className="hidden" 
+                ref={fileInputRef} 
+                onChange={handleFileChange} 
+              />
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors border border-slate-200"
+              >
+                <Camera className="w-4 h-4 text-brand-primary" />
+                Upload Foto
+              </button>
+              <button 
+                onClick={() => {
+                  const url = prompt("Masukkan Link Gambar:");
+                  if (url) setImageUrl(url);
+                }}
+                className="hidden md:flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors border border-slate-200"
+              >
+                <ImageIcon className="w-4 h-4 text-slate-400" />
+                Input Link
+              </button>
+            </div>
             <button
               onClick={handlePost}
               disabled={isPosting}
-              className="bg-brand-primary text-white px-6 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-brand-secondary transition-colors"
+              className={`bg-brand-primary text-white px-8 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-brand-secondary transition-colors ${isPosting ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
-              <Plus className="w-4 h-4" />
-              {isPosting ? 'Posting...' : 'Post'}
+              {isPosting ? 'Posting...' : 'Kirim Post'}
             </button>
           </div>
         </div>

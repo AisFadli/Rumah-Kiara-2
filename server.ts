@@ -6,6 +6,8 @@ import { JWT } from 'google-auth-library';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import cookieParser from 'cookie-parser';
+import { google } from 'googleapis';
+import { Readable } from 'stream';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,7 +15,8 @@ const __dirname = path.dirname(__filename);
 export const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
   // Google Sheets Auth
@@ -33,8 +36,54 @@ app.use(cookieParser());
   const serviceAccountAuth = new JWT({
     email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
     key: getPrivateKey(),
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    scopes: [
+      'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/drive.file'
+    ],
   });
+
+  const drive = google.drive({ version: 'v3', auth: serviceAccountAuth as any });
+
+  async function uploadToDrive(base64Data: string, fileName: string) {
+    if (!base64Data || !base64Data.startsWith('data:')) return base64Data;
+
+    try {
+      const [header, data] = base64Data.split(',');
+      const mime = header.match(/:(.*?);/)?.[1] || 'image/jpeg';
+      const buffer = Buffer.from(data, 'base64');
+      
+      const stream = new Readable();
+      stream.push(buffer);
+      stream.push(null);
+
+      const response = await drive.files.create({
+        requestBody: {
+          name: fileName,
+          parents: [process.env.GOOGLE_DRIVE_FOLDER_ID || ''],
+        },
+        media: {
+          mimeType: mime,
+          body: stream,
+        },
+        fields: 'id',
+      });
+
+      const fileId = response.data.id;
+      
+      await drive.permissions.create({
+        fileId: fileId!,
+        requestBody: {
+          role: 'reader',
+          type: 'anyone',
+        },
+      });
+
+      return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`;
+    } catch (error) {
+      console.error('Drive Upload Error:', error);
+      return '';
+    }
+  }
 
   const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID || '', serviceAccountAuth);
 
@@ -181,8 +230,12 @@ app.use(cookieParser());
   });
 
   app.post('/api/posts', authenticateToken, async (req: any, res) => {
-    const { content, imageUrl } = req.body;
+    let { content, imageUrl } = req.body;
     try {
+      if (imageUrl && imageUrl.startsWith('data:')) {
+        imageUrl = await uploadToDrive(imageUrl, `post_${Date.now()}.jpg`);
+      }
+      
       const sheet = await getSheet('Posts');
       await sheet.addRow({
         author: req.user.name,
@@ -236,8 +289,27 @@ app.use(cookieParser());
         title: r.get('title'),
         description: r.get('description'),
         date: r.get('date'),
-        location: r.get('location')
+        location: r.get('location'),
+        pic: r.get('pic') || '',
+        phone: r.get('phone') || ''
       })).reverse());
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post('/api/activities', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const { title, description, date, location, pic, phone } = req.body;
+    try {
+      const sheet = await getSheet('Activities');
+      await sheet.addRow({
+        title,
+        description,
+        date,
+        location,
+        pic,
+        phone
+      });
+      res.json({ success: true });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
