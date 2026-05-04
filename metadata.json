@@ -1,0 +1,12 @@
+{
+  "name": "Rumah Kiara 2",
+  "description": "A community management app for Rumah Kiara 2 residents featuring a social feed, activity tracking, and financial management using Google Sheets as a database.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "Real-time database",
+    "Social community",
+    "Financial tracking"
+  ]
+}
