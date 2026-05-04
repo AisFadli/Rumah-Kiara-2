@@ -22,8 +22,13 @@ async function startServer() {
   const getPrivateKey = () => {
     let key = process.env.GOOGLE_PRIVATE_KEY;
     if (!key) return undefined;
+    
+    // Clean-up common formatting issues from .env or Secrets
     key = key.trim();
+    if (key.startsWith("'") && key.endsWith("'")) { key = key.slice(1, -1); }
     if (key.startsWith('"') && key.endsWith('"')) { key = key.slice(1, -1); }
+    
+    // Convert escaped newlines back to actual newlines
     return key.replace(/\\n/g, '\n');
   };
 
@@ -94,6 +99,7 @@ async function startServer() {
       res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none' });
       res.json({ name: userRow.get('name'), role: userRow.get('role'), username: userRow.get('username') });
     } catch (e: any) {
+      console.error('Login Error:', e);
       res.status(500).json({ error: e.message });
     }
   });
@@ -122,7 +128,8 @@ async function startServer() {
 
       res.json({ success: true, message: 'Pendaftaran berhasil dikirim, menunggu persetujuan admin.' });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      console.error('Registration Error:', e);
+      res.status(500).json({ error: `Server Error: ${e.message}` });
     }
   });
 
