@@ -1,5 +1,4 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
@@ -11,12 +10,11 @@ import cookieParser from 'cookie-parser';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
+const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json());
-  app.use(cookieParser());
+app.use(express.json());
+app.use(cookieParser());
 
   // Google Sheets Auth
   const getPrivateKey = () => {
@@ -344,7 +342,8 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
+    const { createServer } = await import('vite');
+    const vite = await createServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
@@ -363,12 +362,4 @@ async function startServer() {
     });
   }
 
-  return app;
-}
-
-export const appPromise = startServer();
-// Export the app for Vercel
-export default async (req: any, res: any) => {
-  const app = await appPromise;
-  return app(req, res);
-};
+export default app;
