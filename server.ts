@@ -246,28 +246,21 @@ async function startServer() {
       if (token) {
         try {
           const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-          if (decoded && decoded.username) {
-            isResident = true;
-          }
+          isResident = true;
         } catch (e) {}
       }
 
-      const posts = rows.map(r => {
-        const rawVis = (r.get('visibility') || '').toString().trim().toLowerCase();
-        // Any post that isn't explicitly marked as resident is public
-        const visibility = (rawVis === 'resident' || rawVis === 'penghuni') ? 'resident' : 'public';
-        return {
-          id: r.rowNumber,
-          author: r.get('author'),
-          authorProfilePic: r.get('authorProfilePic') || '',
-          content: r.get('content'),
-          imageUrl: r.get('imageUrl'),
-          driveId: r.get('driveId'),
-          likes: parseInt(r.get('likes') || '0'),
-          visibility,
-          createdAt: r.get('createdAt')
-        };
-      });
+      const posts = rows.map(r => ({
+        id: r.rowNumber,
+        author: r.get('author'),
+        authorProfilePic: r.get('authorProfilePic') || '',
+        content: r.get('content'),
+        imageUrl: r.get('imageUrl'),
+        driveId: r.get('driveId'),
+        likes: parseInt(r.get('likes') || '0'),
+        visibility: r.get('visibility') || 'public',
+        createdAt: r.get('createdAt')
+      }));
 
       const filteredPosts = posts.filter(p => p.visibility === 'public' || isResident);
       res.json(filteredPosts.reverse());
@@ -278,8 +271,6 @@ async function startServer() {
     const { content, imageUrl, driveId, visibility = 'public' } = req.body;
     try {
       const sheet = await getSheet('Posts');
-      const rawVis = (visibility || 'public').toString().trim().toLowerCase();
-      const normalizedVis = (rawVis === 'resident' || rawVis === 'penghuni') ? 'resident' : 'public';
       await sheet.addRow({
         author: req.user.name,
         authorProfilePic: req.user.profilePic || '',
@@ -287,7 +278,7 @@ async function startServer() {
         imageUrl: imageUrl || '',
         driveId: driveId || '',
         likes: 0,
-        visibility: normalizedVis,
+        visibility,
         createdAt: new Date().toISOString()
       });
       res.json({ success: true });

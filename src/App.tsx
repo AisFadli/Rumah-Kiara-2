@@ -621,16 +621,11 @@ const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number)
   const [comments, setComments] = useState<{ author: string; content: string; createdAt: string }[]>([]);
   const [showComments, setShowComments] = useState(false);
   const [newComment, setNewComment] = useState('');
-  const [likeNotice, setLikeNotice] = useState(false);
 
   const fetchComments = async () => {
-    try {
-      const res = await fetch(`/api/posts/${post.id}/comments`);
-      const data = await res.json();
-      if (Array.isArray(data)) setComments(data);
-    } catch (e) {
-      console.error(e);
-    }
+    const res = await fetch(`/api/posts/${post.id}/comments`);
+    const data = await res.json();
+    setComments(data);
   };
 
   useEffect(() => {
@@ -638,11 +633,7 @@ const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number)
   }, [showComments]);
 
   const handleLike = async () => {
-    if (!user) {
-      setLikeNotice(true);
-      setTimeout(() => setLikeNotice(false), 2500);
-      return;
-    }
+    if (!user) return;
     const res = await fetch(`/api/posts/${post.id}/like`, { method: 'POST' });
     const data = await res.json();
     if (data.likes) setLikes(data.likes);
@@ -677,26 +668,23 @@ const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number)
               <img src={post.authorProfilePic} className="w-10 h-10 rounded-full object-cover border border-slate-100" alt="" />
             ) : (
               <div className="w-10 h-10 rounded-full bg-brand-primary/10 text-brand-primary flex items-center justify-center font-bold uppercase">
-                {post.author ? post.author[0] : 'W'}
+                {post.author[0]}
               </div>
             )}
             <div>
               <div className="flex items-center gap-2">
                 <h4 className="font-bold text-slate-900">{post.author}</h4>
-                {post.visibility === 'resident' ? (
-                  <span className="text-[10px] bg-slate-900 text-white px-2 py-0.5 rounded-full font-bold">Khusus Penghuni</span>
-                ) : (
-                  <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-bold">Publik</span>
+                {post.visibility === 'resident' && (
+                  <span className="text-[10px] bg-slate-900 text-white px-2 py-0.5 rounded-full font-bold">Hanya Penghuni</span>
                 )}
               </div>
-              <p className="text-xs text-slate-400">{new Date(post.createdAt).toLocaleString('id-ID')}</p>
+              <p className="text-xs text-slate-400">{new Date(post.createdAt).toLocaleString()}</p>
             </div>
           </div>
           {user?.role === 'admin' && (
             <button 
               onClick={() => onDelete(post.id)}
               className="p-2 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors opacity-0 group-hover:opacity-100"
-              title="Hapus Postingan"
             >
               <X className="w-5 h-5" />
             </button>
@@ -725,25 +713,23 @@ const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number)
           )}
         </div>
       )}
-      <div className="px-6 py-4 border-t border-slate-50 flex items-center gap-6 relative">
+      <div className="px-6 py-4 border-t border-slate-50 flex items-center gap-6">
         <button 
           onClick={handleLike}
-          className={`flex items-center gap-2 transition-colors ${user ? 'hover:text-brand-primary text-slate-500' : 'text-slate-400 hover:text-slate-600'}`}
+          className={`flex items-center gap-2 transition-colors ${user ? 'hover:text-brand-primary text-slate-500' : 'text-slate-300 cursor-not-allowed'}`}
         >
           <Heart className={`w-5 h-5 ${likes > post.likes ? 'fill-rose-500 text-rose-500' : ''}`} />
           <span className="text-sm font-medium">{likes}</span>
         </button>
-        {likeNotice && (
-          <span className="absolute left-6 -top-6 bg-slate-900 text-white text-[10px] px-2 py-1 rounded-lg animate-fade-in shadow-md">
-            Login untuk menyukai
-          </span>
-        )}
         <button 
           onClick={() => setShowComments(!showComments)}
           className="flex items-center gap-2 text-slate-500 hover:text-brand-primary transition-colors"
         >
           <MessageSquare className="w-5 h-5" />
-          <span className="text-sm font-medium">Komentar ({comments.length > 0 ? comments.length : 'Lihat'})</span>
+          <span className="text-sm font-medium">Komentar</span>
+        </button>
+        <button className="flex items-center gap-2 text-slate-500 hover:text-brand-primary transition-colors ml-auto">
+          <Share2 className="w-5 h-5" />
         </button>
       </div>
       
@@ -755,32 +741,25 @@ const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number)
             exit={{ height: 0, opacity: 0 }}
             className="border-t border-slate-50 bg-slate-50/50 p-6 space-y-4"
           >
-            {user ? (
+            {user && (
               <form onSubmit={handleComment} className="flex gap-2">
                 <input 
                   placeholder="Tulis komentar..." 
-                  className="flex-1 p-2 text-sm rounded-xl border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
+                  className="flex-1 p-2 text-sm rounded-xl border border-slate-200 bg-white"
                   value={newComment}
                   onChange={(e) => setNewComment(e.target.value)}
                 />
-                <button className="bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-slate-800">Kirim</button>
+                <button className="bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-bold">Kirim</button>
               </form>
-            ) : (
-              <div className="bg-white border border-slate-200 p-3 rounded-xl text-xs text-slate-500 text-center">
-                Silakan login sebagai warga untuk menulis komentar.
-              </div>
             )}
             <div className="space-y-3">
               {comments.map((c, i) => (
                 <div key={i} className="flex gap-3">
-                  <div className="w-8 h-8 rounded-full bg-white border border-slate-200 flex items-center justify-center text-[10px] font-bold text-brand-primary shrink-0 uppercase">
-                    {c.author ? c.author[0] : 'U'}
+                  <div className="w-8 h-8 rounded-full bg-white border border-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-400 shrink-0">
+                    {c.author[0]}
                   </div>
                   <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-sm flex-1">
-                    <div className="flex justify-between items-center mb-1">
-                      <p className="text-xs font-bold text-slate-900">{c.author}</p>
-                      <p className="text-[10px] text-slate-400">{new Date(c.createdAt).toLocaleDateString('id-ID')}</p>
-                    </div>
+                    <p className="text-xs font-bold text-slate-900 mb-1">{c.author}</p>
                     <p className="text-sm text-slate-600">{c.content}</p>
                   </div>
                 </div>
@@ -798,7 +777,6 @@ const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; t
   const [newContent, setNewContent] = useState('');
   const [mediaUrl, setMediaUrl] = useState('');
   const [visibility, setVisibility] = useState<'public' | 'resident'>('public');
-  const [feedFilter, setFeedFilter] = useState<'all' | 'public' | 'resident'>('all');
   const [isPosting, setIsPosting] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
@@ -909,13 +887,6 @@ const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; t
     if (Array.isArray(data)) setPosts(data);
   };
 
-  const displayedPosts = posts.filter(p => {
-    if (!user) return p.visibility === 'public';
-    if (feedFilter === 'public') return p.visibility === 'public';
-    if (feedFilter === 'resident') return p.visibility === 'resident';
-    return true;
-  });
-
   return (
     <div className="max-w-2xl mx-auto space-y-8 pb-12">
       {user && (
@@ -999,65 +970,16 @@ const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; t
         </div>
       )}
 
-      {/* Header and Filter */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
-        <div>
-          <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-            <ImageIcon className="w-5 h-5 text-brand-primary" />
-            <span>{user ? 'Feed Komunitas' : 'Postingan Publik Warga'}</span>
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            {user ? 'Semua update, foto, dan kegiatan warga Rumah Kiara 2' : 'Dapat dilihat oleh seluruh pengunjung dan publik'}
-          </p>
-        </div>
-
-        {user ? (
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl shrink-0">
-            <button
-              onClick={() => setFeedFilter('all')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${feedFilter === 'all' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}
-            >
-              Semua ({posts.length})
-            </button>
-            <button
-              onClick={() => setFeedFilter('public')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${feedFilter === 'public' ? 'bg-white shadow-sm text-brand-primary' : 'text-slate-500'}`}
-            >
-              Publik ({posts.filter(p => p.visibility === 'public').length})
-            </button>
-            <button
-              onClick={() => setFeedFilter('resident')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${feedFilter === 'resident' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}
-            >
-              Penghuni ({posts.filter(p => p.visibility === 'resident').length})
-            </button>
-          </div>
-        ) : (
-          <div className="text-xs font-bold px-3 py-1.5 bg-emerald-50 text-emerald-700 rounded-xl border border-emerald-100 inline-flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            Mode Publik Terbuka
-          </div>
-        )}
-      </div>
-
       {!user && (
-        <div className="bg-slate-50 border border-slate-200/80 p-4 rounded-2xl flex items-center justify-between text-xs text-slate-600">
-          <span>Ingin berbagi foto kegiatan atau memberi komentar?</span>
-          <span className="font-bold text-brand-primary">Silakan Login</span>
+        <div className="bg-slate-100 p-4 rounded-xl text-center text-sm text-slate-500">
+          Hanya penghuni yang dapat memposting foto dan komentar.
         </div>
       )}
 
       <div className="space-y-8">
-        {displayedPosts.map((post) => (
+        {posts.map((post) => (
           <PostCard key={post.id} post={post} user={user} onDelete={handleDelete} />
         ))}
-        {displayedPosts.length === 0 && (
-          <div className="text-center py-16 bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
-            <ImageIcon className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-            <p className="text-slate-600 font-bold">Belum ada postingan publik</p>
-            <p className="text-xs text-slate-400 mt-1">Postingan dengan visibilitas publik akan muncul di sini.</p>
-          </div>
-        )}
       </div>
     </div>
   );
