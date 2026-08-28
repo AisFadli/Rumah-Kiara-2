@@ -316,7 +316,6 @@ export default function App() {
             />
           )}
           {activeTab === 'feed' && <FeedContent key="feed" posts={posts} user={user} setPosts={setPosts} targetPostId={targetPostId} setTargetPostId={setTargetPostId} />}
-          {activeTab === 'profile' && <ProfileContent key="profile" user={user} setUser={setUser} />}
           {activeTab === 'login' && <LoginContent key="login" setUser={setUser} setActiveTab={setActiveTab} />}
           {activeTab === 'dashboard' && <DashboardContent key="dashboard" user={user} financials={financials} setFinancials={setFinancials} />}
           {activeTab === 'admin' && <AdminContent key="admin" />}
