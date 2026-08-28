@@ -259,45 +259,31 @@ export default function App() {
   // Auth State
   useEffect(() => {
     fetch('/api/auth/me')
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
+      .then(res => res.json())
       .then(data => {
-        if (data && !data.error) setUser(data);
-      })
-      .catch(err => {
-        console.warn('Auth session check failed or user not logged in:', err);
-      })
-      .finally(() => {
+        if (data) setUser(data);
         setLoading(false);
       });
   }, []);
 
   // Fetch Public Data
   useEffect(() => {
-    fetch('/api/stats')
-      .then(res => res.ok ? res.json() : { residentCount: 0 })
-      .then(data => setResidentCount(data?.residentCount || 0))
-      .catch(() => setResidentCount(0));
+    fetch('/api/stats').then(res => res.json()).then(data => setResidentCount(data.residentCount || 0));
     
     if (activeTab === 'feed' || activeTab === 'home') {
       fetch('/api/posts')
-        .then(res => res.ok ? res.json() : [])
-        .then(data => Array.isArray(data) ? setPosts(data) : setPosts([]))
-        .catch(() => setPosts([]));
+        .then(res => res.json())
+        .then(data => Array.isArray(data) ? setPosts(data) : setPosts([]));
     }
     if (activeTab === 'activities' || activeTab === 'home') {
       fetch('/api/activities')
-        .then(res => res.ok ? res.json() : [])
-        .then(data => Array.isArray(data) ? setActivities(data) : setActivities([]))
-        .catch(() => setActivities([]));
+        .then(res => res.json())
+        .then(data => Array.isArray(data) ? setActivities(data) : setActivities([]));
     }
     if (activeTab === 'dashboard' && user) {
       fetch('/api/financials')
-        .then(res => res.ok ? res.json() : [])
-        .then(data => Array.isArray(data) ? setFinancials(data) : setFinancials([]))
-        .catch(() => setFinancials([]));
+        .then(res => res.json())
+        .then(data => Array.isArray(data) ? setFinancials(data) : setFinancials([]));
     }
   }, [activeTab, user]);
 
