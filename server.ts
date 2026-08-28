@@ -11,7 +11,6 @@ import bcrypt from 'bcryptjs';
 import cookieParser from 'cookie-parser';
 import fileUpload from 'express-fileupload';
 import fs from 'fs';
-import { GoogleGenAI } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,50 +21,6 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Utility to normalize image URLs across local, drive, and legacy links
-function normalizeImageUrl(url?: string, driveId?: string): string {
-  if (driveId && typeof driveId === 'string' && driveId.trim()) {
-    return `/api/drive-image/${driveId.trim()}`;
-  }
-  if (!url || typeof url !== 'string' || !url.trim()) return '';
-  let cleaned = url.trim();
-
-  // If accidentally doubled origin e.g. "https://my-app.run.apphttps://..."
-  const doubleOrigin = cleaned.match(/https?:\/\/[^\/]+(https?:\/\/.+)/);
-  if (doubleOrigin) {
-    cleaned = doubleOrigin[1];
-  }
-
-  // If already an internal path
-  if (cleaned.startsWith('/api/drive-image/') || cleaned.startsWith('/uploads/')) {
-    return cleaned;
-  }
-
-  // If it's a full URL pointing to our internal endpoint
-  const internalDriveMatch = cleaned.match(/\/api\/drive-image\/([a-zA-Z0-9_-]+)/);
-  if (internalDriveMatch) {
-    return `/api/drive-image/${internalDriveMatch[1]}`;
-  }
-
-  const internalUploadMatch = cleaned.match(/\/uploads\/([^/?#]+)/);
-  if (internalUploadMatch) {
-    return `/uploads/${internalUploadMatch[1]}`;
-  }
-
-  // Google Drive LH3 CDN or Drive direct links
-  const lh3Match = cleaned.match(/lh3\.googleusercontent\.com\/d\/([a-zA-Z0-9_-]+)/);
-  if (lh3Match) {
-    return `/api/drive-image/${lh3Match[1]}`;
-  }
-
-  const driveMatch = cleaned.match(/drive\.google\.com\/(?:file\/d\/|uc\?(?:export=view&)?id=)([a-zA-Z0-9_-]+)/);
-  if (driveMatch) {
-    return `/api/drive-image/${driveMatch[1]}`;
-  }
-
-  return cleaned;
-}
-
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -74,7 +29,7 @@ async function startServer() {
   app.use(cookieParser());
   app.use(fileUpload());
 
-  // Serve static files from uploads directory
+  // Serve static files from public
   app.use('/uploads', express.static(uploadsDir));
   const getPrivateKey = () => {
     let key = process.env.GOOGLE_PRIVATE_KEY;
@@ -94,9 +49,7 @@ async function startServer() {
     key: getPrivateKey(),
     scopes: [
       'https://www.googleapis.com/auth/spreadsheets',
-      'https://www.googleapis.com/auth/drive',
-      'https://www.googleapis.com/auth/drive.file',
-      'https://www.googleapis.com/auth/drive.readonly'
+      'https://www.googleapis.com/auth/drive.file'
     ],
   });
 
@@ -231,9 +184,6 @@ async function startServer() {
     if (!token) return res.json(null);
     jwt.verify(token, process.env.JWT_SECRET || 'secret', (err: any, user: any) => {
       if (err) return res.json(null);
-      if (user && user.profilePic) {
-        user.profilePic = normalizeImageUrl(user.profilePic);
-      }
       res.json(user);
     });
   });
@@ -247,7 +197,7 @@ async function startServer() {
       if (userRow) {
         if (name) userRow.set('name', name);
         if (houseNumber) userRow.set('houseNumber', houseNumber);
-        if (profilePic !== undefined) userRow.set('profilePic', normalizeImageUrl(profilePic));
+        if (profilePic !== undefined) userRow.set('profilePic', profilePic);
         await userRow.save();
         
         const updatedUser = {
@@ -255,7 +205,7 @@ async function startServer() {
           username: userRow.get('username'),
           role: userRow.get('role'),
           houseNumber: userRow.get('houseNumber'),
-          profilePic: normalizeImageUrl(userRow.get('profilePic') || '')
+          profilePic: userRow.get('profilePic') || ''
         };
         const token = jwt.sign(updatedUser, process.env.JWT_SECRET || 'secret');
         res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none' }).json(updatedUser);
@@ -285,73 +235,6 @@ async function startServer() {
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // Direct streaming of Google Drive images to browser
-  app.get('/api/drive-image/:id', async (req, res) => {
-    try {
-      const fileId = req.params.id;
-      if (!fileId) return res.status(400).send('Missing file ID');
-
-      try {
-        const meta = await drive.files.get({
-          fileId,
-          fields: 'mimeType, name, size'
-        });
-        if (meta.data.mimeType) {
-          res.setHeader('Content-Type', meta.data.mimeType);
-        } else {
-          res.setHeader('Content-Type', 'image/jpeg');
-        }
-      } catch (e) {
-        res.setHeader('Content-Type', 'image/jpeg');
-      }
-
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      const streamRes = await drive.files.get(
-        { fileId, alt: 'media' },
-        { responseType: 'stream' }
-      );
-
-      streamRes.data.on('error', (err: any) => {
-        console.error('Drive stream error:', err?.message || err);
-        if (!res.headersSent) res.status(500).end();
-      });
-
-      streamRes.data.pipe(res);
-    } catch (err: any) {
-      console.error('Drive image error:', err?.message || err);
-      res.status(404).send('Image not found');
-    }
-  });
-
-  // AI Content Safety Check API (Gemini server-side)
-  app.post('/api/check-safety', async (req, res) => {
-    const { content, mediaUrl } = req.body;
-    try {
-      if (!process.env.GEMINI_API_KEY) {
-        return res.json({ safe: true });
-      }
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: `Analyze this social media post for a residential cluster community. 
-Content: ${content || ''}
-Media URL: ${mediaUrl || 'None'}
-
-Is this appropriate? Avoid hate speech, explicit content, or illegal activities. 
-Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation if unsafe"}`,
-        config: {
-          responseMimeType: 'application/json'
-        }
-      });
-      const text = response.text || '{}';
-      const data = JSON.parse(text);
-      res.json({ safe: data.safe ?? true, reason: data.reason });
-    } catch (e: any) {
-      console.error('Safety check error:', e?.message || e);
-      res.json({ safe: true });
-    }
-  });
-
   // Feed / Posts
   app.get('/api/posts', async (req: any, res) => {
     try {
@@ -362,27 +245,22 @@ Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation i
       let isResident = false;
       if (token) {
         try {
-          jwt.verify(token, process.env.JWT_SECRET || 'secret');
+          const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'secret');
           isResident = true;
         } catch (e) {}
       }
 
-      const posts = rows.map(r => {
-        const driveId = r.get('driveId') || '';
-        const rawImageUrl = r.get('imageUrl') || '';
-        const rawProfilePic = r.get('authorProfilePic') || '';
-        return {
-          id: r.rowNumber,
-          author: r.get('author'),
-          authorProfilePic: normalizeImageUrl(rawProfilePic),
-          content: r.get('content'),
-          imageUrl: normalizeImageUrl(rawImageUrl, driveId),
-          driveId: driveId,
-          likes: parseInt(r.get('likes') || '0'),
-          visibility: r.get('visibility') || 'public',
-          createdAt: r.get('createdAt')
-        };
-      });
+      const posts = rows.map(r => ({
+        id: r.rowNumber,
+        author: r.get('author'),
+        authorProfilePic: r.get('authorProfilePic') || '',
+        content: r.get('content'),
+        imageUrl: r.get('imageUrl'),
+        driveId: r.get('driveId'),
+        likes: parseInt(r.get('likes') || '0'),
+        visibility: r.get('visibility') || 'public',
+        createdAt: r.get('createdAt')
+      }));
 
       const filteredPosts = posts.filter(p => p.visibility === 'public' || isResident);
       res.json(filteredPosts.reverse());
@@ -393,14 +271,13 @@ Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation i
     const { content, imageUrl, driveId, visibility = 'public' } = req.body;
     try {
       const sheet = await getSheet('Posts');
-      const finalImageUrl = normalizeImageUrl(imageUrl, driveId);
       await sheet.addRow({
         author: req.user.name,
-        authorProfilePic: normalizeImageUrl(req.user.profilePic || ''),
+        authorProfilePic: req.user.profilePic || '',
         content,
-        imageUrl: finalImageUrl || '',
+        imageUrl: imageUrl || '',
         driveId: driveId || '',
-        likes: '0',
+        likes: 0,
         visibility,
         createdAt: new Date().toISOString()
       });
@@ -440,7 +317,7 @@ Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation i
         date: r.get('date'),
         description: r.get('description'),
         addedBy: r.get('addedBy'),
-        proofUrl: normalizeImageUrl(r.get('proofUrl') || ''),
+        proofUrl: r.get('proofUrl') || '',
         status: r.get('status') || 'approved',
         submittedBy: r.get('submittedBy') || ''
       }));
@@ -598,7 +475,7 @@ Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation i
         houseNumber: r.get('houseNumber'),
         status: r.get('status'),
         role: r.get('role'),
-        profilePic: normalizeImageUrl(r.get('profilePic') || ''),
+        profilePic: r.get('profilePic') || '',
         createdAt: r.get('createdAt')
       })));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -662,7 +539,7 @@ Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation i
             fields: 'id, webViewLink, webContentLink',
           });
 
-          // Make file public if possible
+          // Make file public if possible (may fail based on drive settings)
           try {
             await drive.permissions.create({
               fileId: response.data.id!,
@@ -675,9 +552,9 @@ Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation i
             console.warn('Could not set public permissions on Drive file:', permError);
           }
 
-          const fileId = response.data.id!;
-          // Streamable proxy endpoint that works for any viewer
-          const publicUrl = `/api/drive-image/${fileId}`;
+          // Return a direct-ish link if it's an image
+          const fileId = response.data.id;
+          const publicUrl = `https://lh3.googleusercontent.com/d/${fileId}=s0`;
           return res.json({ url: publicUrl, driveId: fileId });
         } catch (e: any) {
           console.error('Google Drive Upload Error:', e);

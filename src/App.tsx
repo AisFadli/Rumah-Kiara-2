@@ -26,17 +26,28 @@ import {
   Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { GoogleGenAI } from '@google/genai';
 
-// --- Server-side Gemini Safety Check ---
+// --- Gemini Safety Check ---
+const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+
 async function checkContentSafety(content: string, mediaUrl?: string): Promise<{ safe: boolean; reason?: string }> {
   try {
-    const response = await fetch('/api/check-safety', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, mediaUrl })
+    const response = await genAI.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Analyze this social media post for a residential cluster community. 
+      Content: ${content}
+      Media URL: ${mediaUrl || "None"}
+      
+      Is this appropriate? Avoid hate speech, explicit content, or illegal activities. 
+      Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation if unsafe"}`,
+      config: {
+        responseMimeType: "application/json"
+      }
     });
-    if (!response.ok) return { safe: true };
-    const data = await response.json();
+
+    const text = response.text || "{}";
+    const data = JSON.parse(text);
     return { safe: data.safe ?? true, reason: data.reason };
   } catch (e) {
     console.error('Safety check error:', e);
@@ -59,7 +70,6 @@ interface Post {
   authorProfilePic?: string;
   content: string;
   imageUrl?: string;
-  driveId?: string;
   visibility?: 'public' | 'resident';
   likes: number;
   createdAt: string;
@@ -390,16 +400,8 @@ const HomeContent: React.FC<{ activities: Activity[]; posts: Post[]; residentCou
               >
                 <div className="flex gap-4">
                   {post.imageUrl && (
-                    <div className="w-20 h-20 rounded-xl overflow-hidden shrink-0 border border-slate-50 bg-slate-100 flex items-center justify-center">
-                      <img 
-                        src={post.imageUrl} 
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover group-hover:scale-110 transition-transform" 
-                        alt="" 
-                        onError={(e) => {
-                          (e.target as HTMLElement).style.display = 'none';
-                        }}
-                      />
+                    <div className="w-20 h-20 rounded-xl overflow-hidden shrink-0 border border-slate-50">
+                      <img src={post.imageUrl} className="w-full h-full object-cover group-hover:scale-110 transition-transform" alt="" />
                     </div>
                   )}
                   <div className="flex-1 min-w-0 flex flex-col justify-between">
@@ -662,15 +664,7 @@ const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number)
         <div className="flex justify-between items-start">
           <div className="flex items-center gap-3">
             {post.authorProfilePic ? (
-              <img 
-                src={post.authorProfilePic} 
-                referrerPolicy="no-referrer"
-                className="w-10 h-10 rounded-full object-cover border border-slate-100" 
-                alt="" 
-                onError={(e) => {
-                  (e.target as HTMLElement).style.display = 'none';
-                }}
-              />
+              <img src={post.authorProfilePic} className="w-10 h-10 rounded-full object-cover border border-slate-100" alt="" />
             ) : (
               <div className="w-10 h-10 rounded-full bg-brand-primary/10 text-brand-primary flex items-center justify-center font-bold uppercase">
                 {post.author[0]}
@@ -698,21 +692,7 @@ const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number)
         <p className="text-slate-700 leading-relaxed">{post.content}</p>
       </div>
       {post.imageUrl && !isVideo && (
-        <div className="w-full bg-slate-50 flex items-center justify-center overflow-hidden">
-          <img 
-            src={post.imageUrl} 
-            referrerPolicy="no-referrer"
-            alt="Post content" 
-            className="w-full object-cover max-h-[500px]" 
-            onError={(e) => {
-              const target = e.target as HTMLImageElement;
-              // If lh3 direct image failed, check if driveId is present to stream from backend
-              if (post.driveId && !target.src.includes('/api/drive-image/')) {
-                target.src = `/api/drive-image/${post.driveId}`;
-              }
-            }}
-          />
-        </div>
+        <img src={post.imageUrl} alt="Post content" className="w-full object-cover max-h-[500px]" />
       )}
       {post.imageUrl && isVideo && (
         <div className="w-full aspect-video">
@@ -795,7 +775,6 @@ const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number)
 const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; targetPostId?: number | null; setTargetPostId?: (id: number | null) => void }> = ({ posts, user, setPosts, targetPostId, setTargetPostId }) => {
   const [newContent, setNewContent] = useState('');
   const [mediaUrl, setMediaUrl] = useState('');
-  const [driveId, setDriveId] = useState('');
   const [visibility, setVisibility] = useState<'public' | 'resident'>('public');
   const [isPosting, setIsPosting] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -853,8 +832,7 @@ const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; t
 
       const data = await res.json();
       if (data.url) {
-        setMediaUrl(data.url);
-        setDriveId(data.driveId || '');
+        setMediaUrl(window.location.origin + data.url);
       }
     } catch (error: any) {
       console.error('Upload failed', error);
@@ -882,7 +860,7 @@ const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; t
     const res = await fetch('/api/posts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: newContent, imageUrl: mediaUrl, driveId, visibility })
+      body: JSON.stringify({ content: newContent, imageUrl: mediaUrl, visibility })
     });
     
     if (!res.ok) {
@@ -894,7 +872,6 @@ const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; t
 
     setNewContent('');
     setMediaUrl('');
-    setDriveId('');
     const refreshRes = await fetch('/api/posts');
     const data = await refreshRes.json();
     if (Array.isArray(data)) setPosts(data);
@@ -957,9 +934,9 @@ const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; t
 
               {mediaUrl && (
                 <div className="flex-1 flex items-center gap-2 px-3 py-1 bg-emerald-50 text-emerald-700 text-xs rounded-lg border border-emerald-100 overflow-hidden">
-                  <span className="font-bold shrink-0">Foto Siap:</span>
+                  <span className="font-bold shrink-0">Media Ready:</span>
                   <span className="truncate opacity-70">{mediaUrl}</span>
-                  <button onClick={() => { setMediaUrl(''); setDriveId(''); }} className="ml-auto text-emerald-900 font-bold px-2">X</button>
+                  <button onClick={() => setMediaUrl('')} className="ml-auto text-emerald-900 font-bold px-2">X</button>
                 </div>
               )}
             </div>
@@ -1071,7 +1048,7 @@ const ProfileContent: React.FC<{ user: User | null; setUser: (u: User | null) =>
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: formData });
       const data = await res.json();
-      if (data.url) setProfilePic(data.url);
+      if (data.url) setProfilePic(window.location.origin + data.url);
     } catch (err) {
       console.error(err);
     } finally {
@@ -1301,15 +1278,7 @@ const AdminContent: React.FC = () => {
                   <td className="py-4 px-8">
                     <div className="flex items-center gap-3">
                       {u.profilePic ? (
-                        <img 
-                          src={u.profilePic} 
-                          referrerPolicy="no-referrer"
-                          className="w-10 h-10 rounded-full object-cover border border-slate-100" 
-                          alt="" 
-                          onError={(e) => {
-                            (e.target as HTMLElement).style.display = 'none';
-                          }}
-                        />
+                        <img src={u.profilePic} className="w-10 h-10 rounded-full object-cover border border-slate-100" alt="" />
                       ) : (
                         <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center font-bold text-slate-400 text-xs">
                           {u.name[0]}
@@ -1451,7 +1420,7 @@ const DashboardContent: React.FC<{ user: User | null; financials: Financial[]; s
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: fd });
       const data = await res.json();
-      if (data.url) setFormData({ ...formData, proofUrl: data.url });
+      if (data.url) setFormData({ ...formData, proofUrl: window.location.origin + data.url });
     } catch (err) { console.error(err); }
     finally { setIsUploading(false); }
   };
