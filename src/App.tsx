@@ -22,30 +22,47 @@ import {
   Menu,
   X,
   Lock,
-  Phone,
-  User as UserIcon,
+  Video,
   Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+
+// --- Server-side Gemini Safety Check ---
+async function checkContentSafety(content: string, mediaUrl?: string): Promise<{ safe: boolean; reason?: string }> {
+  try {
+    const response = await fetch('/api/check-safety', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, mediaUrl })
+    });
+    if (!response.ok) return { safe: true };
+    const data = await response.json();
+    return { safe: data.safe ?? true, reason: data.reason };
+  } catch (e) {
+    console.error('Safety check error:', e);
+    return { safe: true }; 
+  }
+}
 
 // --- Types ---
 interface User {
   username: string;
   name: string;
   role: 'resident' | 'admin';
-  avatar?: string;
-  houseNumber?: string;
+  houseNumber: string;
+  profilePic?: string;
 }
 
 interface Post {
   id: number;
   author: string;
-  authorAvatar?: string;
+  authorProfilePic?: string;
   content: string;
   imageUrl?: string;
+  driveId?: string;
+  visibility?: 'public' | 'resident';
   likes: number;
   createdAt: string;
-  isPublic?: boolean;
 }
 
 interface Activity {
@@ -59,27 +76,54 @@ interface Activity {
 }
 
 interface Financial {
-  id: number;
+  id?: number;
   type: 'income' | 'expense';
   category: string;
   amount: number;
   date: string;
   description: string;
   addedBy: string;
-  attachment?: string;
-  status: 'pending' | 'approved';
+  proofUrl?: string;
+  status: 'pending' | 'approved' | 'rejected';
+  submittedBy?: string;
 }
 
 interface UserData {
   username: string;
   name: string;
   houseNumber: string;
-  status: 'pending' | 'approved' | 'rejected';
+  status: 'pending' | 'approved' | 'rejected' | 'reset_requested';
   role: string;
+  profilePic?: string;
   createdAt: string;
 }
 
 // --- Components ---
+
+const Pagination = ({ totalItems, itemsPerPage, currentPage, onPageChange }: { totalItems: number, itemsPerPage: number, currentPage: number, onPageChange: (p: number) => void }) => {
+  const totalPages = Math.ceil(totalItems / itemsPerPage);
+  if (totalPages <= 1) return null;
+
+  return (
+    <div className="flex items-center justify-center gap-2 mt-6">
+      <button 
+        disabled={currentPage === 1}
+        onClick={() => onPageChange(currentPage - 1)}
+        className="px-4 py-2 text-sm font-bold bg-white border border-slate-200 rounded-xl disabled:opacity-50"
+      >
+        Prev
+      </button>
+      <span className="text-sm font-bold text-slate-500">Halaman {currentPage} dari {totalPages}</span>
+      <button 
+        disabled={currentPage === totalPages}
+        onClick={() => onPageChange(currentPage + 1)}
+        className="px-4 py-2 text-sm font-bold bg-white border border-slate-200 rounded-xl disabled:opacity-50"
+      >
+        Next
+      </button>
+    </div>
+  );
+};
 
 const Navbar = ({ user, onLogout, setActiveTab, activeTab }: { user: User | null; onLogout: () => void; setActiveTab: (t: string) => void; activeTab: string }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -87,18 +131,16 @@ const Navbar = ({ user, onLogout, setActiveTab, activeTab }: { user: User | null
   const navItems = [
     { id: 'home', label: 'Home', icon: Home },
     { id: 'activities', label: 'Kegiatan', icon: Calendar },
-    { id: 'residents', label: 'Warga', icon: Users },
     { id: 'feed', label: 'Feed', icon: ImageIcon },
   ];
 
   if (user) {
-    navItems.push({ id: 'dashboard', label: 'Kas', icon: Wallet });
-    navItems.push({ id: 'profile', label: 'Profil Saya', icon: UserIcon });
+    navItems.push({ id: 'dashboard', label: 'Kas & Keuangan', icon: Wallet });
     if (user.role === 'admin') {
       navItems.push({ id: 'admin', label: 'Panel Admin', icon: LayoutDashboard });
     }
   } else {
-    navItems.push({ id: 'login', label: 'Login', icon: LogOut });
+    navItems.push({ id: 'login', label: 'Login Penghuni', icon: Users });
   }
 
   return (
@@ -127,9 +169,24 @@ const Navbar = ({ user, onLogout, setActiveTab, activeTab }: { user: User | null
               </button>
             ))}
             {user && (
-              <button onClick={onLogout} className="text-slate-500 hover:text-red-500 transition-colors">
-                <LogOut className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-4 pl-4 border-l border-slate-200">
+                <button 
+                  onClick={() => setActiveTab('profile')}
+                  className={`flex items-center gap-2 transition-opacity hover:opacity-80 ${activeTab === 'profile' ? 'text-brand-primary' : 'text-slate-600'}`}
+                >
+                  {user.profilePic ? (
+                    <img src={user.profilePic} className="w-8 h-8 rounded-full object-cover border border-slate-200" alt="Avatar" />
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-brand-primary/10 text-brand-primary flex items-center justify-center font-bold text-xs">
+                      {user.name[0]}
+                    </div>
+                  )}
+                  <span className="font-bold text-sm hidden lg:block">{user.name ? user.name.split(' ')[0] : ''}</span>
+                </button>
+                <button onClick={onLogout} className="text-slate-400 hover:text-red-500 transition-colors">
+                  <LogOut className="w-5 h-5" />
+                </button>
+              </div>
             )}
           </div>
 
@@ -182,17 +239,11 @@ const Navbar = ({ user, onLogout, setActiveTab, activeTab }: { user: User | null
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [activeTab, setActiveTab] = useState('home');
+  const [targetPostId, setTargetPostId] = useState<number | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
-  const [postPage, setPostPage] = useState(1);
-  const [totalPostPages, setTotalPostPages] = useState(1);
-  
   const [activities, setActivities] = useState<Activity[]>([]);
-  
   const [financials, setFinancials] = useState<Financial[]>([]);
-  const [finPage, setFinPage] = useState(1);
-  const [totalFinPages, setTotalFinPages] = useState(1);
   const [residentCount, setResidentCount] = useState(0);
-  const [residentList, setResidentList] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Auth State
@@ -200,13 +251,7 @@ export default function App() {
     fetch('/api/auth/me')
       .then(res => res.json())
       .then(data => {
-        if (data) {
-          // Fetch full profile info for current user
-          fetch('/api/profile')
-            .then(res => res.json())
-            .then(profile => setUser(prev => prev ? { ...prev, ...profile } : profile));
-          setUser(data);
-        }
+        if (data) setUser(data);
         setLoading(false);
       });
   }, []);
@@ -215,20 +260,10 @@ export default function App() {
   useEffect(() => {
     fetch('/api/stats').then(res => res.json()).then(data => setResidentCount(data.residentCount || 0));
     
-    if (activeTab === 'residents') {
-      fetch('/api/residents')
-        .then(res => res.json())
-        .then(data => Array.isArray(data) ? setResidentList(data) : []);
-    }
     if (activeTab === 'feed' || activeTab === 'home') {
-      fetch(`/api/posts?page=${postPage}&limit=5`)
+      fetch('/api/posts')
         .then(res => res.json())
-        .then(data => {
-          if (data.posts) {
-            setPosts(data.posts);
-            setTotalPostPages(data.totalPages);
-          }
-        });
+        .then(data => Array.isArray(data) ? setPosts(data) : setPosts([]));
     }
     if (activeTab === 'activities' || activeTab === 'home') {
       fetch('/api/activities')
@@ -236,16 +271,11 @@ export default function App() {
         .then(data => Array.isArray(data) ? setActivities(data) : setActivities([]));
     }
     if (activeTab === 'dashboard' && user) {
-      fetch(`/api/financials?page=${finPage}&limit=10`)
+      fetch('/api/financials')
         .then(res => res.json())
-        .then(data => {
-          if (data.financials) {
-            setFinancials(data.financials);
-            setTotalFinPages(data.totalPages);
-          }
-        });
+        .then(data => Array.isArray(data) ? setFinancials(data) : setFinancials([]));
     }
-  }, [activeTab, user, postPage, finPage]);
+  }, [activeTab, user]);
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -263,13 +293,21 @@ export default function App() {
       
       <main className="max-w-7xl mx-auto px-4 py-8">
         <AnimatePresence mode="wait">
-          {activeTab === 'home' && <HomeContent key="home" activities={activities} posts={posts} residentCount={residentCount} />}
-          {activeTab === 'activities' && <ActivitiesContent key="activities" activities={activities} user={user} setActivities={setActivities} />}
-          {activeTab === 'feed' && <FeedContent key="feed" posts={posts} user={user} setPosts={setPosts} currentPage={postPage} totalPages={totalPostPages} setPage={setPostPage} />}
-          {activeTab === 'residents' && <ResidentsContent residents={residentList} />}
-          {activeTab === 'profile' && <ProfileContent user={user} setUser={setUser} posts={posts} setActiveTab={setActiveTab} />}
+          {activeTab === 'home' && <HomeContent key="home" activities={activities} posts={posts} residentCount={residentCount} setActiveTab={setActiveTab} setTargetPostId={setTargetPostId} />}
+          {activeTab === 'profile' && <ProfileContent key="profile" user={user} setUser={setUser} />}
+          {activeTab === 'activities' && (
+            <ActivitiesContent 
+              key="activities" 
+              activities={activities} 
+              user={user} 
+              onAddSuccess={() => {
+                fetch('/api/activities').then(res => res.json()).then(data => setActivities(data));
+              }}
+            />
+          )}
+          {activeTab === 'feed' && <FeedContent key="feed" posts={posts} user={user} setPosts={setPosts} targetPostId={targetPostId} setTargetPostId={setTargetPostId} />}
           {activeTab === 'login' && <LoginContent key="login" setUser={setUser} setActiveTab={setActiveTab} />}
-          {activeTab === 'dashboard' && <DashboardContent key="dashboard" user={user} financials={financials} setFinancials={setFinancials} currentPage={finPage} totalPages={totalFinPages} setPage={setFinPage} />}
+          {activeTab === 'dashboard' && <DashboardContent key="dashboard" user={user} financials={financials} setFinancials={setFinancials} />}
           {activeTab === 'admin' && <AdminContent key="admin" />}
           {activeTab === 'register' && <RegisterContent key="register" setActiveTab={setActiveTab} />}
           {activeTab === 'reset-password' && <ResetPasswordContent key="reset" setActiveTab={setActiveTab} />}
@@ -285,120 +323,162 @@ export default function App() {
 
 // --- Sub-Pages ---
 
-const HomeContent = ({ activities, posts, residentCount }: { activities: Activity[]; posts: Post[]; residentCount: number; key?: string }) => (
-  <motion.div
-    initial={{ opacity: 0, y: 20 }}
-    animate={{ opacity: 1, y: 0 }}
-    exit={{ opacity: 0, y: -20 }}
-    className="space-y-12"
-  >
-    <section className="relative rounded-3xl overflow-hidden min-h-[400px] flex items-center bg-slate-900 text-white p-8 md:p-16">
-      <div className="absolute inset-0 z-0 opacity-40 bg-[url('https://images.unsplash.com/photo-1542332213-9b5a5a3fad35?auto=format&fit=crop&q=80&w=2000')] bg-cover bg-center"></div>
-      <div className="relative z-10 max-w-2xl">
-        <h1 className="text-4xl md:text-6xl font-bold mb-6">Welcome to Rumah Kiara 2</h1>
-        <p className="text-lg md:text-xl opacity-90 mb-8">Hunian nyaman, asri, dan terpercaya. Tempat di mana tetangga menjadi keluarga.</p>
-        <div className="flex gap-4">
-          <div className="bg-white/10 backdrop-blur rounded-2xl p-4 border border-white/20">
-            <h3 className="text-2xl font-bold">{residentCount}</h3>
-            <p className="text-xs uppercase tracking-widest opacity-70">Keluarga</p>
-          </div>
-          <div className="bg-white/10 backdrop-blur rounded-2xl p-4 border border-white/20">
-            <h3 className="text-2xl font-bold">Safe</h3>
-            <p className="text-xs uppercase tracking-widest opacity-70">Security 24/7</p>
-          </div>
-        </div>
-      </div>
-    </section>
+const HomeContent: React.FC<{ activities: Activity[]; posts: Post[]; residentCount: number; setActiveTab: (t: string) => void; setTargetPostId: (id: number) => void }> = ({ activities, posts, residentCount, setActiveTab, setTargetPostId }) => {
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 4;
+  
+  const handlePostClick = (postId: number) => {
+    setTargetPostId(postId);
+    setActiveTab('feed');
+  };
 
-    <div className="grid md:grid-cols-2 gap-12">
-      <div className="space-y-6">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-3xl font-bold text-slate-900">Kegiatan Mendatang</h2>
-          <Calendar className="text-emerald-500 w-8 h-8" />
-        </div>
-        <div className="space-y-4">
-          {activities.length > 0 ? activities.slice(0, 3).map((act, i) => (
-            <div key={i} className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-sm hover:shadow-md transition-all">
-              <span className="text-emerald-500 font-bold text-lg mb-2 block">{new Date(act.date).toLocaleDateString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit' }).split('/').reverse().join('-')}</span>
-              <h3 className="text-2xl font-bold text-slate-900 mb-4">{act.title}</h3>
-              <p className="text-slate-500 leading-relaxed">{act.description}</p>
-            </div>
-          )) : (
-            <div className="text-center py-12 bg-white rounded-3xl border-2 border-dashed border-slate-100 text-slate-400">
-              Belum ada kegiatan mendatang
-            </div>
-          )}
-        </div>
-      </div>
+  const paginatedPosts = posts.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
-      <div className="space-y-6">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-3xl font-bold text-slate-900">Update Warga</h2>
-          <ImageIcon className="text-emerald-500 w-8 h-8" />
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      className="space-y-12"
+    >
+      <section className="relative rounded-3xl overflow-hidden min-h-[400px] flex items-center bg-slate-900 text-white p-8 md:p-16">
+        <div className="absolute inset-0 z-0 opacity-40 bg-[url('https://images.unsplash.com/photo-1542332213-9b5a5a3fad35?auto=format&fit=crop&q=80&w=2000')] bg-cover bg-center"></div>
+        <div className="relative z-10 max-w-2xl">
+          <h1 className="text-4xl md:text-6xl font-bold mb-6">Welcome to Rumah Kiara 2</h1>
+          <p className="text-lg md:text-xl opacity-90 mb-8">Hunian nyaman, asri, dan terpercaya. Tempat di mana tetangga menjadi keluarga.</p>
+          <div className="flex gap-4">
+            <div className="bg-white/10 backdrop-blur rounded-2xl p-4 border border-white/20">
+              <h3 className="text-2xl font-bold">{residentCount}</h3>
+              <p className="text-xs uppercase tracking-widest opacity-70">Keluarga</p>
+            </div>
+            <div className="bg-white/10 backdrop-blur rounded-2xl p-4 border border-white/20">
+              <h3 className="text-2xl font-bold">Safe</h3>
+              <p className="text-xs uppercase tracking-widest opacity-70">Security 24/7</p>
+            </div>
+          </div>
         </div>
-        <div className="space-y-4">
-          {posts.slice(0, 4).map((p, i) => (
-            <div key={i} className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm hover:shadow-md transition-all flex gap-6">
-              <div className="w-24 h-24 md:w-32 md:h-32 rounded-3xl overflow-hidden bg-slate-50 shrink-0 border border-slate-100 shadow-inner">
-                {p.imageUrl ? (
-                  <img src={p.imageUrl} alt="Update" className="w-full h-full object-cover" />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-300">
-                    <ImageIcon className="w-10 h-10" />
+      </section>
+
+      <div className="grid md:grid-cols-2 gap-12">
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold">Kegiatan Mendatang</h2>
+            <Calendar className="text-brand-primary" />
+          </div>
+          <div className="space-y-4">
+            {activities.slice(0, 3).map((act, i) => (
+              <div key={i} className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                <span className="text-brand-primary font-bold text-sm">{act.date}</span>
+                <h3 className="text-lg font-bold mt-1">{act.title}</h3>
+                <p className="text-slate-600 text-sm mt-2 line-clamp-2">{act.description}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold">Update Warga</h2>
+            <ImageIcon className="text-brand-primary" />
+          </div>
+          <div className="space-y-4">
+            {paginatedPosts.map((post, i) => (
+              <button 
+                key={i} 
+                onClick={() => handlePostClick(post.id)}
+                className="w-full text-left bg-white p-4 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-all group overflow-hidden"
+              >
+                <div className="flex gap-4">
+                  {post.imageUrl && (
+                    <div className="w-20 h-20 rounded-xl overflow-hidden shrink-0 border border-slate-50 bg-slate-100 flex items-center justify-center">
+                      <img 
+                        src={post.imageUrl} 
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover group-hover:scale-110 transition-transform" 
+                        alt="" 
+                        onError={(e) => {
+                          (e.target as HTMLElement).style.display = 'none';
+                        }}
+                      />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] font-bold text-brand-primary uppercase truncate">{post.author}</span>
+                        <span className="text-[10px] text-slate-400">{new Date(post.createdAt).toLocaleDateString()}</span>
+                      </div>
+                      <p className="text-sm text-slate-700 line-clamp-2 leading-relaxed">
+                        {post.content}
+                      </p>
+                    </div>
                   </div>
-                )}
-              </div>
-              <div className="flex-1 space-y-2 py-1">
-                <div className="flex justify-between items-start">
-                  <span className="text-xs font-black text-emerald-500 uppercase tracking-widest">
-                    {p.author.toUpperCase() === 'ADMIN' ? 'ADMIN' : 'WARGA'}
-                  </span>
-                  <span className="text-[10px] md:text-xs font-medium text-slate-300">
-                    {new Date(p.createdAt).toLocaleDateString('id-ID')}
-                  </span>
                 </div>
-                <p className="text-slate-700 font-medium line-clamp-3 leading-relaxed">
-                  {p.content}
-                </p>
-              </div>
-            </div>
-          ))}
+              </button>
+            ))}
+            
+            <Pagination 
+              totalItems={posts.length}
+              itemsPerPage={itemsPerPage}
+              currentPage={currentPage}
+              onPageChange={setCurrentPage}
+            />
+
+            <button 
+              onClick={() => setActiveTab('feed')}
+              className="w-full py-3 text-center text-xs font-bold text-slate-400 hover:text-brand-primary transition-colors bg-slate-50 rounded-xl border border-dashed border-slate-200"
+            >
+              Lihat Semua Postingan
+            </button>
+          </div>
         </div>
       </div>
-    </div>
-  </motion.div>
-);
+    </motion.div>
+  );
+};
 
-const ActivitiesContent = ({ activities, user, setActivities }: { activities: Activity[]; user: User | null; setActivities: any; key?: string }) => {
+const ActivitiesContent: React.FC<{ activities: Activity[]; user: User | null; onAddSuccess: () => void }> = ({ activities, user, onAddSuccess }) => {
   const [showAdd, setShowAdd] = useState(false);
   const [formData, setFormData] = useState({ title: '', description: '', date: '', location: '', pic: '', phone: '' });
-  const [isSaving, setIsSaving] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleAdd = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSaving(true);
-    try {
-      await fetch('/api/activities', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
-      });
-      setFormData({ title: '', description: '', date: '', location: '', pic: '', phone: '' });
-      setShowAdd(false);
-      const res = await fetch('/api/activities');
-      setActivities(await res.json());
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsSaving(false);
+    setIsSubmitting(true);
+    setError('');
+
+    // Safety Check
+    if (user?.role !== 'admin') {
+      const safety = await checkContentSafety(`${formData.title} ${formData.description}`);
+      if (!safety.safe) {
+        setError(`Konten ditolak AI: ${safety.reason}`);
+        setIsSubmitting(false);
+        return;
+      }
     }
+
+    const res = await fetch('/api/activities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(formData)
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      setError(data.error || 'Gagal menyimpan kegiatan.');
+      setIsSubmitting(false);
+      return;
+    }
+    setFormData({ title: '', description: '', date: '', location: '', pic: '', phone: '' });
+    setShowAdd(false);
+    setIsSubmitting(false);
+    onAddSuccess();
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('Hapus kegiatan ini?')) return;
     await fetch(`/api/activities/${id}`, { method: 'DELETE' });
-    const res = await fetch('/api/activities');
-    setActivities(await res.json());
+    onAddSuccess();
   };
 
   return (
@@ -406,75 +486,83 @@ const ActivitiesContent = ({ activities, user, setActivities }: { activities: Ac
       <div className="text-center space-y-4">
         <h2 className="text-3xl font-bold">Kegiatan & Acara</h2>
         <p className="text-slate-600">Jadwal kegiatan rutin dan khusus di cluster Rumah Kiara 2.</p>
-        {user?.role === 'admin' && (
-          <button 
-            onClick={() => setShowAdd(!showAdd)}
-            className="bg-slate-900 text-white px-6 py-2 rounded-xl font-bold flex items-center gap-2 mx-auto"
-          >
-            <Plus className="w-4 h-4" />
-            {showAdd ? 'Tutup Form' : 'Tambah Kegiatan'}
-          </button>
-        )}
+        <div className="flex gap-4 justify-center">
+          {user && (
+            <button 
+              onClick={() => setShowAdd(!showAdd)}
+              className="mt-4 bg-slate-900 text-white px-8 py-3 rounded-2xl font-bold flex items-center gap-2 hover:shadow-lg transition-all"
+            >
+              {showAdd ? <X className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
+              {showAdd ? 'Batal' : 'Tambah Kegiatan'}
+            </button>
+          )}
+        </div>
       </div>
 
       <AnimatePresence>
         {showAdd && (
           <motion.div 
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
           >
-            <form onSubmit={handleAdd} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-xl space-y-4">
-              <div className="grid md:grid-cols-2 gap-4">
-                <input 
-                  placeholder="Nama Kegiatan" 
-                  className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
-                  value={formData.title} 
-                  onChange={e => setFormData({...formData, title: e.target.value})} 
-                  required 
-                />
+            <form onSubmit={handleSubmit} className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-4 mb-8">
+              <h3 className="text-xl font-bold mb-4">Buat Jadwal Baru</h3>
+              {error && <div className="p-4 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium">{error}</div>}
+              <input 
+                placeholder="Judul Kegiatan" 
+                className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl"
+                value={formData.title}
+                onChange={e => setFormData({...formData, title: e.target.value})}
+                required
+              />
+              <textarea 
+                placeholder="Deskripsi Kegiatan" 
+                className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl resize-none"
+                rows={3}
+                value={formData.description}
+                onChange={e => setFormData({...formData, description: e.target.value})}
+                required
+              />
+              <div className="grid grid-cols-2 gap-4">
                 <input 
                   type="date" 
-                  className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
-                  value={formData.date} 
-                  onChange={e => setFormData({...formData, date: e.target.value})} 
-                  required 
+                  className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl"
+                  value={formData.date}
+                  onChange={e => setFormData({...formData, date: e.target.value})}
+                  required
+                />
+                <input 
+                  placeholder="Lokasi" 
+                  className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl"
+                  value={formData.location}
+                  onChange={e => setFormData({...formData, location: e.target.value})}
+                  required
                 />
               </div>
-              <input 
-                placeholder="Lokasi" 
-                className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
-                value={formData.location} 
-                onChange={e => setFormData({...formData, location: e.target.value})} 
-                required 
-              />
-              <div className="grid md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4">
                 <input 
                   placeholder="PIC (Penanggung Jawab)" 
-                  className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
-                  value={formData.pic} 
-                  onChange={e => setFormData({...formData, pic: e.target.value})} 
+                  className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl"
+                  value={formData.pic}
+                  onChange={e => setFormData({...formData, pic: e.target.value})}
+                  required
                 />
                 <input 
-                  placeholder="No. Telp PIC" 
-                  className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full" 
-                  value={formData.phone} 
-                  onChange={e => setFormData({...formData, phone: e.target.value})} 
+                  placeholder="No. Telpon" 
+                  className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl"
+                  value={formData.phone}
+                  onChange={e => setFormData({...formData, phone: e.target.value})}
+                  required
                 />
               </div>
-              <textarea 
-                placeholder="Keterangan Kegiatan" 
-                className="p-3 bg-slate-50 border border-slate-200 rounded-xl w-full h-32 resize-none" 
-                value={formData.description} 
-                onChange={e => setFormData({...formData, description: e.target.value})} 
-              />
               <button 
                 type="submit" 
-                disabled={isSaving}
+                disabled={isSubmitting}
                 className="w-full bg-brand-primary text-white py-4 rounded-2xl font-bold hover:bg-brand-secondary transition-colors"
               >
-                {isSaving ? 'Menyimpan...' : 'Simpan Kegiatan'}
+                {isSubmitting ? 'Menyimpan...' : 'Simpan Kegiatan'}
               </button>
             </form>
           </motion.div>
@@ -483,239 +571,49 @@ const ActivitiesContent = ({ activities, user, setActivities }: { activities: Ac
 
       <div className="space-y-6">
         {activities.map((act, i) => (
-          <div key={i} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-xl flex gap-6 items-start relative">
-            {user?.role === 'admin' && (
-              <button 
-                onClick={() => handleDelete(act.id)}
-                className="absolute top-4 right-4 text-slate-300 hover:text-rose-500 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            )}
+          <div key={act.id || i} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm flex gap-6 items-start hover:shadow-md transition-shadow relative group">
             <div className="bg-brand-primary/10 text-brand-primary p-4 rounded-2xl shrink-0">
               <Calendar className="w-8 h-8" />
             </div>
-            <div className="space-y-2 flex-1">
+            <div className="space-y-4 flex-1">
               <div className="flex justify-between items-start">
                 <h3 className="text-xl font-bold">{act.title}</h3>
-                <span className="text-xs font-bold px-3 py-1 bg-slate-100 rounded-full">{act.date}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-bold px-3 py-1 bg-slate-100 rounded-full">{act.date}</span>
+                  {user?.role === 'admin' && (
+                    <button 
+                      onClick={() => handleDelete(act.id)}
+                      className="p-2 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors opacity-0 group-hover:opacity-100"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
               </div>
               <p className="text-slate-500">{act.description}</p>
               
-              <div className="pt-4 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-50 mt-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-slate-50">
                 <div className="flex items-center gap-2 text-sm text-slate-500">
-                  <Info className="w-4 h-4 text-slate-400" />
-                  <span>Lokasi: {act.location}</span>
+                  <Info className="w-4 h-4 text-brand-primary" />
+                  <span>Lokasi: <span className="font-medium">{act.location}</span></span>
                 </div>
                 {act.pic && (
                   <div className="flex items-center gap-2 text-sm text-slate-500">
-                    <UserIcon className="w-4 h-4 text-slate-400" />
-                    <span>PIC: {act.pic}</span>
-                  </div>
-                )}
-                {act.phone && (
-                  <div className="flex items-center gap-2 text-sm text-slate-500">
-                    <Phone className="w-4 h-4 text-slate-400" />
-                    <span>Telp: {act.phone}</span>
+                    <Users className="w-4 h-4 text-brand-primary" />
+                    <span>PIC: <span className="font-medium">{act.pic}</span> ({act.phone})</span>
                   </div>
                 )}
               </div>
             </div>
           </div>
         ))}
+        {activities.length === 0 && <p className="text-center text-slate-400 py-12">Belum ada kegiatan terencana.</p>}
       </div>
     </motion.div>
   );
 };
 
-const ResidentsContent = ({ residents }: { residents: any[] }) => (
-  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-8">
-    <div className="text-center space-y-4">
-      <h2 className="text-3xl font-bold">Daftar Penghuni</h2>
-      <p className="text-slate-600">Direktori warga cluster Rumah Kiara 2.</p>
-    </div>
-    <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-      {residents.map((res, i) => (
-        <div key={i} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm flex items-center gap-4">
-          <div className="w-16 h-16 rounded-full bg-slate-100 overflow-hidden shrink-0 border-2 border-brand-primary/10">
-            {res.avatar ? (
-              <img src={res.avatar} alt={res.name} className="w-full h-full object-cover" />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center bg-slate-200 text-slate-500 font-bold text-xl">
-                {res.name[0]}
-              </div>
-            )}
-          </div>
-          <div>
-            <h4 className="font-bold text-slate-800">{res.name}</h4>
-            <p className="text-sm text-slate-500">Blok {res.houseNumber}</p>
-            {res.role === 'admin' && (
-              <span className="text-[10px] uppercase font-bold text-brand-primary bg-brand-primary/10 px-2 py-0.5 rounded-full">
-                Pengurus
-              </span>
-            )}
-          </div>
-        </div>
-      ))}
-    </div>
-  </motion.div>
-);
-
-const ProfileContent = ({ user, setUser, posts, setActiveTab }: { user: User | null; setUser: any; posts: Post[]; setActiveTab: (t: string) => void }) => {
-  const [formData, setFormData] = useState({ name: user?.name || '', houseNumber: user?.houseNumber || '', avatar: user?.avatar || '', password: '' });
-  const [isSaving, setIsSaving] = useState(false);
-  const [message, setMessage] = useState('');
-  const fileRef = React.useRef<HTMLInputElement>(null);
-
-  const handleUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSaving(true);
-    setMessage('');
-    try {
-      const res = await fetch('/api/profile', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
-      });
-      const data = await res.json();
-      if (data.success) {
-        setMessage('V');
-        setUser({ ...user, name: data.name, avatar: data.avatar, houseNumber: formData.houseNumber });
-        setTimeout(() => setMessage(''), 3000);
-      } else {
-        alert(data.error || 'Terjadi kesalahan');
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setFormData({ ...formData, avatar: reader.result as string });
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const myPosts = posts.filter(p => p.author === user?.name);
-
-  return (
-    <div className="max-w-4xl mx-auto space-y-12">
-      <div className="bg-white p-8 rounded-[40px] border border-slate-100 shadow-xl grid md:grid-cols-3 gap-12">
-        <div className="flex flex-col items-center space-y-6">
-          <div className="relative group cursor-pointer" onClick={() => fileRef.current?.click()}>
-            <div className="w-40 h-40 rounded-full overflow-hidden border-4 border-slate-50 shadow-2xl relative">
-              {formData.avatar ? (
-                <img src={formData.avatar} alt="Avatar" className="w-full h-full object-cover" />
-              ) : (
-                <div className="w-full h-full bg-slate-200 flex items-center justify-center text-5xl font-bold text-slate-400">
-                  {user?.name[0]}
-                </div>
-              )}
-              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                <Camera className="text-white w-8 h-8" />
-              </div>
-            </div>
-            <input type="file" hidden ref={fileRef} accept="image/*" onChange={handleAvatarChange} />
-          </div>
-          <div className="text-center">
-            <h3 className="text-2xl font-bold">{user?.name}</h3>
-            <p className="text-slate-400 font-medium">@{user?.username}</p>
-          </div>
-        </div>
-
-        <div className="md:col-span-2 space-y-6">
-          <h4 className="text-lg font-bold flex items-center gap-2">
-            <Info className="w-5 h-5 text-brand-primary" />
-            Update Data Penghuni
-          </h4>
-          <form onSubmit={handleUpdate} className="space-y-4">
-            <div className="grid md:grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Nama Lengkap</label>
-                <input 
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-2xl" 
-                  value={formData.name} 
-                  onChange={e => setFormData({...formData, name: e.target.value})} 
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Nomor Rumah</label>
-                <input 
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-2xl" 
-                  value={formData.houseNumber} 
-                  onChange={e => setFormData({...formData, houseNumber: e.target.value})} 
-                />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-slate-500 uppercase ml-1">Ganti Password (Biarkan kosong jika tidak ganti)</label>
-              <input 
-                type="password"
-                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-2xl" 
-                placeholder="Password baru..."
-                value={formData.password} 
-                onChange={e => setFormData({...formData, password: e.target.value})} 
-              />
-            </div>
-            <button 
-              type="submit" 
-              disabled={isSaving}
-              className="w-full bg-slate-900 text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-black transition-colors"
-            >
-              {isSaving ? 'Menyimpan...' : message === 'V' ? 'Profil Terupdate!' : 'Simpan Perubahan'}
-            </button>
-          </form>
-        </div>
-      </div>
-
-      <div className="space-y-6">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
-          <h3 className="text-2xl font-bold">Riwayat Postingan</h3>
-          <span className="bg-slate-100 px-4 py-1 rounded-full text-xs font-bold text-slate-500">{myPosts.length} Post</span>
-        </div>
-        
-        {myPosts.length > 0 ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-            {myPosts.map((p, i) => (
-              <motion.button 
-                key={i} 
-                whileHover={{ scale: 1.02 }}
-                onClick={() => setActiveTab('feed')}
-                className="aspect-square rounded-2xl overflow-hidden border border-slate-100 shadow-sm relative group bg-slate-50"
-              >
-                {p.imageUrl ? (
-                  <img src={p.imageUrl} className="w-full h-full object-cover" alt="History" />
-                ) : (
-                  <div className="w-full h-full flex flex-col items-center justify-center p-4 text-center">
-                    <MessageSquare className="w-6 h-6 text-slate-200 mb-2" />
-                    <p className="text-[10px] text-slate-400 line-clamp-3">{p.content}</p>
-                  </div>
-                )}
-                <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                  <span className="text-white text-xs font-bold uppercase tracking-wider">Lihat Post</span>
-                </div>
-              </motion.button>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-20 bg-white rounded-3xl border border-slate-100 border-dashed">
-            <ImageIcon className="w-12 h-12 text-slate-200 mx-auto mb-4" />
-            <p className="text-slate-400 italic">Belum ada postingan yang dibagikan.</p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const PostCard = ({ post, user, onDelete }: { post: Post; user: User | null; onDelete?: (id: number) => void; key?: any }) => {
+const PostCard: React.FC<{ post: Post; user: User | null; onDelete: (id: number) => void }> = ({ post, user, onDelete }) => {
   const [likes, setLikes] = useState(post.likes);
   const [comments, setComments] = useState<{ author: string; content: string; createdAt: string }[]>([]);
   const [showComments, setShowComments] = useState(false);
@@ -750,38 +648,89 @@ const PostCard = ({ post, user, onDelete }: { post: Post; user: User | null; onD
     fetchComments();
   };
 
+  const isVideo = post.imageUrl && (post.imageUrl.includes('youtube.com') || post.imageUrl.includes('youtu.be') || post.imageUrl.match(/\.(mp4|webm|ogg)$/i));
+
+  const getYoutubeId = (url: string) => {
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const match = url.match(regExp);
+    return (match && match[2].length === 11) ? match[2] : null;
+  };
+
   return (
-    <div className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden">
+    <div id={`post-${post.id}`} className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden relative group">
       <div className="p-6 space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex justify-between items-start">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center text-slate-600 font-bold overflow-hidden border border-slate-100">
-              {post.authorAvatar ? (
-                <img src={post.authorAvatar} alt={post.author} className="w-full h-full object-cover" />
-              ) : post.author[0]}
-            </div>
+            {post.authorProfilePic ? (
+              <img 
+                src={post.authorProfilePic} 
+                referrerPolicy="no-referrer"
+                className="w-10 h-10 rounded-full object-cover border border-slate-100" 
+                alt="" 
+                onError={(e) => {
+                  (e.target as HTMLElement).style.display = 'none';
+                }}
+              />
+            ) : (
+              <div className="w-10 h-10 rounded-full bg-brand-primary/10 text-brand-primary flex items-center justify-center font-bold uppercase">
+                {post.author[0]}
+              </div>
+            )}
             <div>
               <div className="flex items-center gap-2">
                 <h4 className="font-bold text-slate-900">{post.author}</h4>
-                {!post.isPublic && (
-                  <span className="text-[10px] bg-slate-100 text-slate-400 px-2 py-0.5 rounded-full flex items-center gap-1">
-                    <Lock className="w-2 h-2" /> Warga
-                  </span>
+                {post.visibility === 'resident' && (
+                  <span className="text-[10px] bg-slate-900 text-white px-2 py-0.5 rounded-full font-bold">Hanya Penghuni</span>
                 )}
               </div>
               <p className="text-xs text-slate-400">{new Date(post.createdAt).toLocaleString()}</p>
             </div>
           </div>
-          {user?.role === 'admin' && onDelete && (
-            <button onClick={() => onDelete(post.id)} className="text-slate-300 hover:text-rose-500 transition-colors">
+          {user?.role === 'admin' && (
+            <button 
+              onClick={() => onDelete(post.id)}
+              className="p-2 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors opacity-0 group-hover:opacity-100"
+            >
               <X className="w-5 h-5" />
             </button>
           )}
         </div>
         <p className="text-slate-700 leading-relaxed">{post.content}</p>
       </div>
-      {post.imageUrl && (
-        <img src={post.imageUrl} alt="Post content" className="w-full object-cover max-h-[500px]" />
+      {post.imageUrl && !isVideo && (
+        <div className="w-full bg-slate-50 flex items-center justify-center overflow-hidden">
+          <img 
+            src={post.imageUrl} 
+            referrerPolicy="no-referrer"
+            alt="Post content" 
+            className="w-full object-cover max-h-[500px]" 
+            onError={(e) => {
+              const target = e.target as HTMLImageElement;
+              // If lh3 direct image failed, check if driveId is present to stream from backend
+              if (post.driveId && !target.src.includes('/api/drive-image/')) {
+                target.src = `/api/drive-image/${post.driveId}`;
+              }
+            }}
+          />
+        </div>
+      )}
+      {post.imageUrl && isVideo && (
+        <div className="w-full aspect-video">
+          {post.imageUrl.includes('youtube.com') || post.imageUrl.includes('youtu.be') ? (
+            <iframe 
+              className="w-full h-full"
+              src={`https://www.youtube.com/embed/${getYoutubeId(post.imageUrl)} text-center`}
+              title="YouTube video player"
+              frameBorder="0"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+            ></iframe>
+          ) : (
+            <video controls className="w-full h-full bg-black">
+              <source src={post.imageUrl} />
+            </video>
+          )}
+        </div>
       )}
       <div className="px-6 py-4 border-t border-slate-50 flex items-center gap-6">
         <button 
@@ -843,129 +792,202 @@ const PostCard = ({ post, user, onDelete }: { post: Post; user: User | null; onD
   );
 };
 
-const FeedContent = ({ posts, user, setPosts, currentPage, totalPages, setPage }: { posts: Post[]; user: User | null; setPosts: any; currentPage: number; totalPages: number; setPage: (p: number) => void; key?: string }) => {
+const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; targetPostId?: number | null; setTargetPostId?: (id: number | null) => void }> = ({ posts, user, setPosts, targetPostId, setTargetPostId }) => {
   const [newContent, setNewContent] = useState('');
-  const [imageUrl, setImageUrl] = useState('');
-  const [isPublic, setIsPublic] = useState(false);
+  const [mediaUrl, setMediaUrl] = useState('');
+  const [driveId, setDriveId] = useState('');
+  const [visibility, setVisibility] = useState<'public' | 'resident'>('public');
   const [isPosting, setIsPosting] = useState(false);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [error, setError] = useState('');
 
-  const fetchPosts = async () => {
-    const res = await fetch(`/api/posts?page=${currentPage}&limit=5`);
-    const data = await res.json();
-    if (data.posts) setPosts(data.posts);
-  };
+  useEffect(() => {
+    if (targetPostId && posts.length > 0) {
+      setTimeout(() => {
+        const el = document.getElementById(`post-${targetPostId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          // Highlight effect
+          el.classList.add('ring-4', 'ring-brand-primary/20');
+          setTimeout(() => el.classList.remove('ring-4', 'ring-brand-primary/20'), 2000);
+          if (setTargetPostId) setTargetPostId(null);
+        }
+      }, 100);
+    }
+  }, [targetPostId, posts]);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (file.size > 10 * 1024 * 1024) {
-        alert("File terlalu besar. Maksimal 10MB.");
-        return;
+    if (!file) return;
+
+    setIsUploading(true);
+    setError('');
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+        credentials: 'same-origin'
+      });
+      
+      const contentType = res.headers.get('content-type');
+      if (!res.ok) {
+        let errorMsg = 'Upload failed';
+        if (contentType && contentType.includes('application/json')) {
+          const data = await res.json();
+          errorMsg = data.error || data.detail || errorMsg;
+        } else {
+          const text = await res.text();
+          console.error('Non-JSON error response:', text.substring(0, 200));
+        }
+        throw new Error(errorMsg);
       }
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setImageUrl(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('Unexpected non-JSON response:', text.substring(0, 200));
+        throw new Error('Server returned invalid response format.');
+      }
+
+      const data = await res.json();
+      if (data.url) {
+        setMediaUrl(data.url);
+        setDriveId(data.driveId || '');
+      }
+    } catch (error: any) {
+      console.error('Upload failed', error);
+      setError(error.message || 'Gagal mengunggah file.');
+    } finally {
+      setIsUploading(false);
     }
   };
 
   const handlePost = async () => {
     if (!newContent.trim()) return;
     setIsPosting(true);
-    try {
-      const resPost = await fetch('/api/posts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: newContent, imageUrl, isPublic })
-      });
-      const postData = await resPost.json();
-      if (postData.error) {
-        alert(postData.error);
+    setError('');
+
+    // Safety Check
+    if (user?.role !== 'admin') {
+      const safety = await checkContentSafety(newContent, mediaUrl);
+      if (!safety.safe) {
+        setError(`Konten ditolak AI: ${safety.reason}`);
         setIsPosting(false);
         return;
       }
-
-      setNewContent('');
-      setImageUrl('');
-      fetchPosts();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsPosting(false);
     }
+
+    const res = await fetch('/api/posts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: newContent, imageUrl: mediaUrl, driveId, visibility })
+    });
+    
+    if (!res.ok) {
+      const data = await res.json();
+      setError(data.error || 'Gagal mengirim postingan.');
+      setIsPosting(false);
+      return;
+    }
+
+    setNewContent('');
+    setMediaUrl('');
+    setDriveId('');
+    const refreshRes = await fetch('/api/posts');
+    const data = await refreshRes.json();
+    if (Array.isArray(data)) setPosts(data);
+    setIsPosting(false);
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('Hapus postingan ini?')) return;
     await fetch(`/api/posts/${id}`, { method: 'DELETE' });
-    fetchPosts();
+    const refreshRes = await fetch('/api/posts');
+    const data = await refreshRes.json();
+    if (Array.isArray(data)) setPosts(data);
   };
 
   return (
-    <div className="max-w-2xl mx-auto space-y-8">
+    <div className="max-w-2xl mx-auto space-y-8 pb-12">
       {user && (
         <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-lg space-y-4">
           <div className="flex gap-4">
-            <div className="w-12 h-12 rounded-full bg-slate-100 overflow-hidden shrink-0 border border-slate-200">
-              {user.avatar ? <img src={user.avatar} className="w-full h-full object-cover" /> : user.name[0]}
+            <div className="w-12 h-12 rounded-full bg-brand-primary text-white flex items-center justify-center font-bold shrink-0">
+              {user.name[0]}
             </div>
             <textarea
-              placeholder="Bagikan momen atau info cluster..."
-              className="w-full p-4 bg-slate-50 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-primary/20 min-h-[100px]"
+              placeholder="Bagikan momen, foto, atau video info cluster..."
+              className="w-full p-4 bg-slate-50 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-primary/20"
               rows={3}
               value={newContent}
               onChange={(e) => setNewContent(e.target.value)}
             />
           </div>
+          {error && <div className="p-4 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium">{error}</div>}
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="cursor-pointer flex items-center gap-2 text-slate-600 hover:bg-slate-100 transition-colors bg-slate-50 px-4 py-2 rounded-xl text-sm font-medium border border-slate-100">
+                <ImageIcon className="w-4 h-4" />
+                <span>{isUploading ? 'Mengunggah...' : 'Upload Foto'}</span>
+                <input 
+                  type="file" 
+                  className="hidden" 
+                  accept="image/*" 
+                  onChange={handleFileUpload} 
+                  disabled={isUploading} 
+                />
+              </label>
 
-          {imageUrl && (
-            <div className="relative w-full aspect-video rounded-2xl overflow-hidden border border-slate-100">
-              <img src={imageUrl} alt="Preview" className="w-full h-full object-cover" />
-              <button 
-                onClick={() => setImageUrl('')}
-                className="absolute top-2 right-2 bg-black/60 text-white p-1 rounded-full hover:bg-black/80"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          )}
-
-          <div className="flex flex-col md:flex-row md:items-center justify-between pt-2 gap-4">
-            <div className="flex gap-2 items-center">
-              <input 
-                type="file" 
-                accept="image/*" 
-                className="hidden" 
-                ref={fileInputRef} 
-                onChange={handleFileChange} 
-              />
-              <button 
-                onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors border border-slate-200"
-              >
-                <Camera className="w-4 h-4 text-brand-primary" />
-                Upload Foto
-              </button>
-              
-              <div className="flex items-center gap-2 bg-slate-50 px-3 py-2 rounded-xl border border-slate-100">
-                <span className="text-xs font-bold text-slate-400">Publik?</span>
+              <div className="flex items-center gap-2 bg-slate-50 border border-slate-100 p-1 rounded-xl">
                 <button 
-                  onClick={() => setIsPublic(!isPublic)}
-                  className={`w-12 h-6 rounded-full relative transition-colors ${isPublic ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                  onClick={() => setVisibility('public')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${visibility === 'public' ? 'bg-white shadow-sm text-brand-primary' : 'text-slate-400'}`}
                 >
-                  <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${isPublic ? 'translate-x-6' : ''}`} />
+                  Publik
+                </button>
+                <button 
+                  onClick={() => setVisibility('resident')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${visibility === 'resident' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-400'}`}
+                >
+                  Hanya Penghuni
                 </button>
               </div>
+
+              {mediaUrl && (
+                <div className="flex-1 flex items-center gap-2 px-3 py-1 bg-emerald-50 text-emerald-700 text-xs rounded-lg border border-emerald-100 overflow-hidden">
+                  <span className="font-bold shrink-0">Foto Siap:</span>
+                  <span className="truncate opacity-70">{mediaUrl}</span>
+                  <button onClick={() => { setMediaUrl(''); setDriveId(''); }} className="ml-auto text-emerald-900 font-bold px-2">X</button>
+                </div>
+              )}
             </div>
-            <button
-              onClick={handlePost}
-              disabled={isPosting}
-              className={`bg-brand-primary text-white px-8 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-brand-secondary transition-colors ${isPosting ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              {isPosting ? 'Memeriksa & Posting...' : 'Kirim Post'}
-            </button>
+
+            <div className="pt-2 border-t border-slate-50">
+              <div className="flex items-center gap-2 text-slate-400 text-xs px-2 mb-2">
+                <Video className="w-3 h-3" />
+                <span>Atau masukkan Link Video (YouTube/Direct)</span>
+              </div>
+              <input 
+                type="text" 
+                placeholder="Contoh: https://youtube.com/watch?v=..." 
+                className="w-full text-sm p-4 rounded-xl bg-slate-50 border border-slate-100"
+                value={mediaUrl}
+                onChange={(e) => setMediaUrl(e.target.value)}
+              />
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={handlePost}
+                disabled={isPosting || isUploading || !newContent}
+                className="bg-brand-primary text-white px-8 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-brand-secondary transition-all disabled:opacity-50 disabled:grayscale"
+              >
+                <Plus className="w-4 h-4" />
+                {isPosting ? 'Posting...' : 'Posting Sekarang'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -976,38 +998,159 @@ const FeedContent = ({ posts, user, setPosts, currentPage, totalPages, setPage }
         </div>
       )}
 
-      <div className="space-y-6">
+      <div className="space-y-8">
         {posts.map((post) => (
           <PostCard key={post.id} post={post} user={user} onDelete={handleDelete} />
         ))}
       </div>
-
-      {totalPages > 1 && (
-        <div className="flex justify-center gap-2 py-8">
-          <button 
-            disabled={currentPage === 1}
-            onClick={() => setPage(currentPage - 1)}
-            className="px-4 py-2 bg-white border border-slate-200 rounded-xl disabled:opacity-50"
-          >
-            Prev
-          </button>
-          <span className="px-4 py-2 text-sm font-bold text-slate-500">Hal {currentPage} / {totalPages}</span>
-          <button 
-            disabled={currentPage === totalPages}
-            onClick={() => setPage(currentPage + 1)}
-            className="px-4 py-2 bg-white border border-slate-200 rounded-xl disabled:opacity-50"
-          >
-            Next
-          </button>
-        </div>
-      )}
     </div>
   );
 };
 
-const AdminContent = ({ key }: { key?: string }) => {
+const ProfileContent: React.FC<{ user: User | null; setUser: (u: User | null) => void }> = ({ user, setUser }) => {
+  const [name, setName] = useState(user?.name || '');
+  const [houseNumber, setHouseNumber] = useState(user?.houseNumber || '');
+  const [profilePic, setProfilePic] = useState(user?.profilePic || '');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [msg, setMsg] = useState({ text: '', type: '' });
+
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsUpdating(true);
+    setMsg({ text: '', type: '' });
+    
+    try {
+      const res = await fetch('/api/auth/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, houseNumber, profilePic })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setUser(data);
+      setMsg({ text: 'Profil berhasil diperbarui!', type: 'success' });
+    } catch (err: any) {
+      setMsg({ text: err.message, type: 'error' });
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsUpdating(true);
+    setMsg({ text: '', type: '' });
+    
+    try {
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setMsg({ text: 'Password berhasil diganti!', type: 'success' });
+      setCurrentPassword('');
+      setNewPassword('');
+    } catch (err: any) {
+      setMsg({ text: err.message, type: 'error' });
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handlePicUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.url) setProfilePic(data.url);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  if (!user) return null;
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-4xl mx-auto space-y-8">
+      <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm">
+        <div className="h-32 bg-slate-900"></div>
+        <div className="px-8 pb-8">
+          <div className="relative -mt-16 mb-6 flex flex-col md:flex-row md:items-end gap-6">
+            <div className="relative group">
+              {profilePic ? (
+                <img src={profilePic} className="w-32 h-32 rounded-full object-cover border-4 border-white shadow-lg" alt="" />
+              ) : (
+                <div className="w-32 h-32 rounded-full bg-slate-100 flex items-center justify-center text-4xl font-bold text-slate-300 border-4 border-white shadow-lg">
+                  {user.name[0]}
+                </div>
+              )}
+              <label className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-full opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+                <Camera className="text-white w-8 h-8" />
+                <input type="file" className="hidden" accept="image/*" onChange={handlePicUpload} disabled={isUploading} />
+              </label>
+            </div>
+            <div className="flex-1 space-y-1">
+              <h2 className="text-2xl font-bold text-slate-900">{user.name}</h2>
+              <p className="text-slate-500 font-medium">Penghuni Rumah {user.houseNumber}</p>
+            </div>
+          </div>
+
+          {msg.text && (
+            <div className={`p-4 rounded-xl mb-6 text-sm font-bold ${msg.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+              {msg.text}
+            </div>
+          )}
+
+          <div className="grid md:grid-cols-2 gap-12">
+            <form onSubmit={handleUpdateProfile} className="space-y-4">
+              <h3 className="font-bold text-lg border-b border-slate-100 pb-2">Informasi Profil</h3>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-400 uppercase">Nama Lengkap</label>
+                <input className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl" value={name} onChange={e => setName(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-400 uppercase">Nomor Rumah</label>
+                <input className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl" value={houseNumber} onChange={e => setHouseNumber(e.target.value)} />
+              </div>
+              <button disabled={isUpdating || isUploading} className="bg-brand-primary text-white w-full py-3 rounded-xl font-bold hover:bg-brand-secondary transition-colors">
+                {isUpdating ? 'Menyimpan...' : 'Update Profil'}
+              </button>
+            </form>
+
+            <form onSubmit={handleChangePassword} className="space-y-4">
+              <h3 className="font-bold text-lg border-b border-slate-100 pb-2">Ganti Password</h3>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-400 uppercase">Password Sekarang</label>
+                <input type="password" className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} required />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-400 uppercase">Password Baru</label>
+                <input type="password" className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl" value={newPassword} onChange={e => setNewPassword(e.target.value)} required />
+              </div>
+              <button disabled={isUpdating} className="bg-slate-900 text-white w-full py-3 rounded-xl font-bold hover:shadow-lg transition-all">
+                Update Password
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+};
+
+const AdminContent: React.FC = () => {
   const [users, setUsers] = useState<UserData[]>([]);
-  const [pendingFin, setPendingFin] = useState<Financial[]>([]);
   const [loading, setLoading] = useState(true);
   const [connStatus, setConnStatus] = useState<{ status: string; message?: string; title?: string } | null>(null);
 
@@ -1021,20 +1164,15 @@ const AdminContent = ({ key }: { key?: string }) => {
     }
   };
 
-  const fetchData = async () => {
-    const [resUsers, resFin] = await Promise.all([
-      fetch('/api/admin/users'),
-      fetch('/api/financials?pending=true')
-    ]);
-    const usersData = await resUsers.json();
-    const finData = await resFin.json();
-    if (Array.isArray(usersData)) setUsers(usersData);
-    if (finData.financials) setPendingFin(finData.financials);
+  const fetchUsers = async () => {
+    const res = await fetch('/api/admin/users');
+    const data = await res.json();
+    if (Array.isArray(data)) setUsers(data);
     setLoading(false);
   };
 
   useEffect(() => {
-    fetchData();
+    fetchUsers();
   }, []);
 
   const handleUpdateStatus = async (username: string, status: string) => {
@@ -1043,18 +1181,7 @@ const AdminContent = ({ key }: { key?: string }) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, status })
     });
-    fetchData();
-  };
-
-  const handleApproveFin = async (id: number) => {
-    await fetch(`/api/admin/financials/${id}/approve`, { method: 'PUT' });
-    fetchData();
-  };
-
-  const handleDeleteFin = async (id: number) => {
-    if (!confirm('Hapus/Tolak data ini?')) return;
-    await fetch(`/api/admin/financials/${id}`, { method: 'DELETE' });
-    fetchData();
+    fetchUsers();
   };
 
   if (loading) return <div>Loading...</div>;
@@ -1064,7 +1191,7 @@ const AdminContent = ({ key }: { key?: string }) => {
   const otherUsers = users.filter(u => u.status !== 'pending' && u.status !== 'reset_requested');
   
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-12">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-8">
       <div className="flex items-center justify-between">
         <h2 className="text-3xl font-bold">Panel Admin</h2>
         <div className="flex gap-4">
@@ -1079,48 +1206,6 @@ const AdminContent = ({ key }: { key?: string }) => {
           </div>
         </div>
       </div>
-
-      {pendingFin.length > 0 && (
-        <div className="bg-emerald-50 border border-emerald-200 p-8 rounded-3xl space-y-6">
-          <div className="flex items-center gap-2 text-emerald-800">
-            <Wallet className="w-6 h-6" />
-            <h3 className="text-xl font-bold">Persetujuan Transaksi (Pending)</h3>
-          </div>
-          <div className="grid gap-4">
-            {pendingFin.map((f, i) => (
-              <div key={i} className="bg-white p-6 rounded-2xl shadow-sm border border-emerald-100 flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  {f.attachment && (
-                    <a href={f.attachment} target="_blank" rel="noopener noreferrer" className="w-16 h-16 rounded-xl overflow-hidden border border-slate-100 shrink-0">
-                      <img src={f.attachment} className="w-full h-full object-cover" />
-                    </a>
-                  )}
-                  <div>
-                    <h4 className="font-bold text-lg">{f.description}</h4>
-                    <p className="text-slate-500 text-sm">
-                      Oleh: {f.addedBy} • {f.type === 'income' ? 'Masuk' : 'Keluar'}: <span className={f.type === 'income' ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>Rp {f.amount.toLocaleString()}</span>
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-3">
-                  <button 
-                    onClick={() => handleDeleteFin(f.id)}
-                    className="px-4 py-2 rounded-xl text-sm font-bold text-rose-600 hover:bg-rose-50 transition-colors"
-                  >
-                    Hapus
-                  </button>
-                  <button 
-                    onClick={() => handleApproveFin(f.id)}
-                    className="px-6 py-2 rounded-xl text-sm font-bold bg-brand-primary text-white hover:bg-brand-secondary transition-colors"
-                  >
-                    Approve
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {connStatus && (
         <motion.div 
@@ -1215,15 +1300,21 @@ const AdminContent = ({ key }: { key?: string }) => {
                 <tr key={i} className="border-b border-slate-50">
                   <td className="py-4 px-8">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-slate-100 overflow-hidden border border-slate-200 shrink-0">
-                        {u.avatar ? (
-                          <img src={u.avatar} alt={u.name} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-[10px] font-bold text-slate-400">
-                            {u.name[0]}
-                          </div>
-                        )}
-                      </div>
+                      {u.profilePic ? (
+                        <img 
+                          src={u.profilePic} 
+                          referrerPolicy="no-referrer"
+                          className="w-10 h-10 rounded-full object-cover border border-slate-100" 
+                          alt="" 
+                          onError={(e) => {
+                            (e.target as HTMLElement).style.display = 'none';
+                          }}
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center font-bold text-slate-400 text-xs">
+                          {u.name[0]}
+                        </div>
+                      )}
                       <div>
                         <div className="font-bold">{u.name}</div>
                         <div className="text-xs text-slate-400">{u.username}</div>
@@ -1265,7 +1356,7 @@ const AdminContent = ({ key }: { key?: string }) => {
   );
 };
 
-const ResetPasswordContent = ({ setActiveTab }: { setActiveTab: any; key?: string }) => {
+const ResetPasswordContent: React.FC<{ setActiveTab: any }> = ({ setActiveTab }) => {
   const [formData, setFormData] = useState({ username: '', houseNumber: '', newPassword: '' });
   const [msg, setMsg] = useState('');
 
@@ -1302,58 +1393,86 @@ const ResetPasswordContent = ({ setActiveTab }: { setActiveTab: any; key?: strin
   );
 };
 
-const DashboardContent = ({ user, financials, setFinancials, currentPage, totalPages, setPage }: { user: User | null; financials: Financial[]; setFinancials: any; currentPage: number; totalPages: number; setPage: (p: number) => void; key?: string }) => {
+const DashboardContent: React.FC<{ user: User | null; financials: Financial[]; setFinancials: any }> = ({ user, financials, setFinancials }) => {
   const [showAdd, setShowAdd] = useState(false);
-  const [formData, setFormData] = useState({ type: 'income', category: 'Iuran Bulanan', amount: 0, description: '', attachment: '' });
-  const [isSaving, setIsSaving] = useState(false);
-  const fileRef = React.useRef<HTMLInputElement>(null);
-
-  const fetchFinancials = async () => {
-    const res = await fetch(`/api/financials?page=${currentPage}&limit=10`);
-    const data = await res.json();
-    if (data.financials) {
-      setFinancials(data.financials);
-    }
-  };
-
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => setFormData({ ...formData, attachment: reader.result as string });
-      reader.readAsDataURL(file);
-    }
-  };
+  const [formData, setFormData] = useState({ type: 'income', category: 'Iuran Bulanan', amount: 0, description: '', proofUrl: '' });
+  const [currentPage, setCurrentPage] = useState(1);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const itemsPerPage = 8;
+  const [msg, setMsg] = useState({ text: '', type: '' });
 
   const handleAdd = async () => {
-    if (formData.amount <= 0) return;
-    setIsSaving(true);
+    if (formData.amount <= 0) return setMsg({ text: 'Jumlah harus lebih dari 0', type: 'error' });
+    setIsSubmitting(true);
+    setMsg({ text: '', type: '' });
+    
     try {
       const res = await fetch('/api/financials', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
-      const data = await res.json();
-      if (data.success) {
-        alert(data.pending ? 'Berhasil dikirim! Menunggu approval admin.' : 'Berhasil ditambahkan!');
-        setFormData({ type: 'income', category: 'Iuran Bulanan', amount: 0, description: '', attachment: '' });
-        setShowAdd(false);
-        fetchFinancials();
-      } else {
-        alert(data.error || 'Terjadi kesalahan');
-      }
-    } catch (e) {
-      console.error(e);
+      if (!res.ok) throw new Error('Gagal menyimpan catatan');
+      
+      setShowAdd(false);
+      setFormData({ type: 'income', category: 'Iuran Bulanan', amount: 0, description: '', proofUrl: '' });
+      setMsg({ text: user?.role === 'admin' ? 'Catatan berhasil disimpan!' : 'Catatan terkirim dan menunggu approval.', type: 'success' });
+      
+      const refresh = await fetch('/api/financials');
+      setFinancials(await refresh.json());
+    } catch (err: any) {
+      setMsg({ text: err.message, type: 'error' });
     } finally {
-      setIsSaving(false);
+      setIsSubmitting(false);
     }
   };
 
-  const totalBalance = financials.reduce((acc, curr) => acc + (curr.type === 'income' ? curr.amount : -curr.amount), 0);
+  const handleStatusUpdate = async (id: number, status: string) => {
+    try {
+      const res = await fetch('/api/admin/financials/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, status })
+      });
+      if (res.ok) {
+        const refresh = await fetch('/api/financials');
+        setFinancials(await refresh.json());
+      }
+    } catch (err) { console.error(err); }
+  };
+
+  const handleProofUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploading(true);
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (data.url) setFormData({ ...formData, proofUrl: data.url });
+    } catch (err) { console.error(err); }
+    finally { setIsUploading(false); }
+  };
+
+  // Only count approved items for balance stats
+  const approvedItems = financials.filter(f => f.status === 'approved');
+  const totalBalance = approvedItems.reduce((acc, curr) => acc + (curr.type === 'income' ? curr.amount : -curr.amount), 0);
+  const monthlyIncome = approvedItems.filter(f => f.type === 'income').reduce((a, b) => a + b.amount, 0);
+  const monthlyExpense = approvedItems.filter(f => f.type === 'expense').reduce((a, b) => a + b.amount, 0);
+
+  const paginatedFinancials = financials.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
   return (
     <div className="space-y-8">
+      {msg.text && (
+        <div className={`p-4 rounded-2xl text-sm font-bold flex items-center gap-2 ${msg.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+          <Info className="w-4 h-4" />
+          {msg.text}
+        </div>
+      )}
+
       <div className="grid md:grid-cols-3 gap-6">
         <div className="bg-brand-primary text-white p-8 rounded-3xl shadow-xl shadow-brand-primary/20">
           <p className="text-sm opacity-80 uppercase tracking-wider font-bold">Total Saldo Kas</p>
@@ -1361,15 +1480,15 @@ const DashboardContent = ({ user, financials, setFinancials, currentPage, totalP
         </div>
         <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm flex items-center justify-between">
           <div>
-            <p className="text-sm text-slate-500 font-bold uppercase tracking-wider">Pemasukan</p>
-            <h3 className="text-2xl font-bold mt-1 text-emerald-600">Rp {financials.filter(f => f.type === 'income').reduce((a, b) => a + b.amount, 0).toLocaleString()}</h3>
+            <p className="text-sm text-slate-500 font-bold uppercase tracking-wider">Pemasukan (Total Approved)</p>
+            <h3 className="text-2xl font-bold mt-1 text-emerald-600">Rp {monthlyIncome.toLocaleString()}</h3>
           </div>
           <ArrowUpRight className="text-emerald-500 w-10 h-10" />
         </div>
         <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm flex items-center justify-between">
           <div>
-            <p className="text-sm text-slate-500 font-bold uppercase tracking-wider">Pengeluaran</p>
-            <h3 className="text-2xl font-bold mt-1 text-rose-600">Rp {financials.filter(f => f.type === 'expense').reduce((a, b) => a + b.amount, 0).toLocaleString()}</h3>
+            <p className="text-sm text-slate-500 font-bold uppercase tracking-wider">Pengeluaran (Total Approved)</p>
+            <h3 className="text-2xl font-bold mt-1 text-rose-600">Rp {monthlyExpense.toLocaleString()}</h3>
           </div>
           <ArrowDownRight className="text-rose-500 w-10 h-10" />
         </div>
@@ -1377,105 +1496,131 @@ const DashboardContent = ({ user, financials, setFinancials, currentPage, totalP
 
       <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-xl space-y-6">
         <div className="flex justify-between items-center">
-          <h3 className="text-2xl font-bold">Riwayat Keuangan</h3>
-          <button onClick={() => setShowAdd(!showAdd)} className="bg-slate-900 text-white px-6 py-2 rounded-xl font-bold flex items-center gap-2">
-            <Plus className="w-4 h-4" /> {user?.role === 'admin' ? 'Tambah Catatan' : 'Ajukan Transaksi'}
-          </button>
+          <div>
+            <h3 className="text-2xl font-bold">Riwayat Keuangan</h3>
+            <p className="text-xs text-slate-400 mt-1">Laporan transparansi keuangan warga Kiara 2</p>
+          </div>
+          {user && (
+            <button onClick={() => setShowAdd(!showAdd)} className={`px-6 py-2 rounded-xl font-bold flex items-center gap-2 transition-all ${showAdd ? 'bg-slate-100 text-slate-600' : 'bg-slate-900 text-white shadow-lg'}`}>
+              {showAdd ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+              {showAdd ? 'Batal' : user.role === 'admin' ? 'Tambah Catatan' : 'Bayar/Klaim Kas'}
+            </button>
+          )}
         </div>
 
-        {showAdd && (
-          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="space-y-4 bg-slate-50 p-6 rounded-2xl border border-slate-200">
-            <div className="grid md:grid-cols-3 gap-4">
-              <select className="p-3 bg-white border border-slate-200 rounded-xl" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value as any})}>
-                <option value="income">Pemasukan (Contoh: Iuran)</option>
-                <option value="expense">Pengeluaran (Contoh: Beli Lampu)</option>
-              </select>
-              <input placeholder="Kategori" className="p-3 bg-white border border-slate-200 rounded-xl" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} />
-              <input type="number" placeholder="Jumlah (Rp)" className="p-3 bg-white border border-slate-200 rounded-xl" value={formData.amount || ''} onChange={e => setFormData({...formData, amount: parseFloat(e.target.value)})} />
-            </div>
-            <div className="grid md:grid-cols-2 gap-4">
-              <div className="flex gap-2 items-center">
-                <input type="file" hidden ref={fileRef} onChange={handleFile} accept="image/*" />
-                <button 
-                  onClick={() => fileRef.current?.click()}
-                  className={`flex-1 p-3 border rounded-xl text-xs font-bold transition-colors ${formData.attachment ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-white border-slate-200 text-slate-500'}`}
-                >
-                  {formData.attachment ? 'Bukti Terpilih' : 'Upload Bukti Transfer/Bon'}
-                </button>
-                {formData.attachment && (
-                  <button onClick={() => setFormData({...formData, attachment: ''})} className="text-rose-500"><X className="w-5 h-5" /></button>
-                )}
+        <AnimatePresence>
+          {showAdd && (
+            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+              <div className="bg-slate-50 p-6 rounded-2xl border border-slate-200 grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Jenis</label>
+                  <select className="w-full p-3 bg-white border border-slate-200 rounded-xl text-sm" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value as any})}>
+                    <option value="income">Pemasukan / Iuran</option>
+                    <option value="expense">Pengeluaran / Klaim</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Kategori</label>
+                  <input placeholder="Contoh: Iuran Keamanan" className="w-full p-3 bg-white border border-slate-200 rounded-xl text-sm" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Jumlah (Rp)</label>
+                  <input type="number" placeholder="0" className="w-full p-3 bg-white border border-slate-200 rounded-xl text-sm" value={formData.amount} onChange={e => setFormData({...formData, amount: parseFloat(e.target.value)})} />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Lampirkan Bukti</label>
+                  <label className={`w-full p-3 bg-white border border-slate-200 rounded-xl text-sm flex items-center gap-2 cursor-pointer transition-colors ${formData.proofUrl ? 'border-emerald-500 text-emerald-600' : 'hover:border-slate-300'}`}>
+                    <Camera className="w-4 h-4" />
+                    <span className="truncate">{isUploading ? 'Uploading...' : formData.proofUrl ? 'Bukti Ada' : 'Hanya Foto/PDF'}</span>
+                    <input type="file" className="hidden" accept="image/*,application/pdf" onChange={handleProofUpload} disabled={isUploading} />
+                  </label>
+                </div>
+                <div className="md:col-span-2 lg:col-span-3 space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Keterangan</label>
+                  <input placeholder="Contoh: Pembayaran iuran bulan Mei" className="w-full p-3 bg-white border border-slate-200 rounded-xl text-sm" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} />
+                </div>
+                <div className="flex items-end">
+                  <button onClick={handleAdd} disabled={isSubmitting || isUploading || formData.amount <= 0} className="w-full h-[46px] bg-brand-primary text-white rounded-xl font-bold hover:bg-brand-secondary transition-all disabled:opacity-50">
+                    {isSubmitting ? 'Mengirim...' : 'Simpan Transaksi'}
+                  </button>
+                </div>
               </div>
-              <div className="flex gap-2">
-                <input placeholder="Keterangan / Catatan" className="flex-1 p-3 bg-white border border-slate-200 rounded-xl" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} />
-                <button 
-                  disabled={isSaving}
-                  onClick={handleAdd} 
-                  className="bg-brand-primary text-white px-6 rounded-xl font-bold hover:bg-brand-secondary disabled:opacity-50"
-                >
-                  {isSaving ? '...' : 'Kirim'}
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <div className="overflow-x-auto">
           <table className="w-full text-left">
             <thead>
               <tr className="border-b border-slate-100">
-                <th className="py-4 px-2 font-bold text-slate-400 text-sm uppercase">Tanggal</th>
-                <th className="py-4 px-2 font-bold text-slate-400 text-sm uppercase">Kategori</th>
-                <th className="py-4 px-2 font-bold text-slate-400 text-sm uppercase text-center">Bukti</th>
-                <th className="py-4 px-2 font-bold text-slate-400 text-sm uppercase">Keterangan</th>
-                <th className="py-4 px-2 font-bold text-slate-400 text-sm uppercase text-right">Jumlah</th>
+                <th className="py-4 px-2 font-bold text-slate-400 text-[10px] uppercase">Tanggal</th>
+                <th className="py-4 px-2 font-bold text-slate-400 text-[10px] uppercase">Kategori</th>
+                <th className="py-4 px-2 font-bold text-slate-400 text-[10px] uppercase">Keterangan</th>
+                <th className="py-4 px-2 font-bold text-slate-400 text-[10px] uppercase">Bukti</th>
+                <th className="py-4 px-2 font-bold text-slate-400 text-[10px] uppercase text-center">Status</th>
+                <th className="py-4 px-2 font-bold text-slate-400 text-[10px] uppercase text-right">Jumlah</th>
+                {user?.role === 'admin' && <th className="py-4 px-2 font-bold text-slate-400 text-[10px] uppercase text-right">Aksi</th>}
               </tr>
             </thead>
             <tbody>
-              {financials.map((f, i) => (
-                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
-                  <td className="py-4 px-2 text-sm">{f.date}</td>
-                  <td className="py-4 px-2 font-medium">{f.category}</td>
-                  <td className="py-4 px-2 text-center">
-                    {f.attachment ? (
-                      <a href={f.attachment} target="_blank" rel="noopener noreferrer" className="text-brand-primary hover:underline text-xs font-bold">Lihat Bukti</a>
+              {paginatedFinancials.map((f, i) => (
+                <tr key={i} className={`border-b border-slate-50 hover:bg-slate-50/50 transition-colors ${f.status === 'pending' ? 'bg-amber-50/30' : ''}`}>
+                  <td className="py-4 px-2 text-xs text-slate-400">{f.date}</td>
+                  <td className="py-4 px-2">
+                    <span className="font-bold text-sm text-slate-700 block">{f.category}</span>
+                    <span className="text-[10px] text-slate-400 font-medium">Oleh: {f.addedBy}</span>
+                  </td>
+                  <td className="py-4 px-2 text-xs text-slate-600 max-w-[200px] truncate">{f.description}</td>
+                  <td className="py-4 px-2">
+                    {f.proofUrl ? (
+                      <a href={f.proofUrl} target="_blank" rel="noreferrer" className="text-brand-primary hover:underline text-[10px] font-bold flex items-center gap-1">
+                        <ImageIcon className="w-3 h-3" /> Lihat
+                      </a>
                     ) : '-'}
                   </td>
-                  <td className="py-4 px-2 text-slate-500 text-sm">{f.description}</td>
-                  <td className={`py-4 px-2 text-right font-bold ${f.type === 'income' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  <td className="py-4 px-2 text-center">
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
+                      f.status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
+                      f.status === 'rejected' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'
+                    }`}>
+                      {f.status}
+                    </span>
+                  </td>
+                  <td className={`py-4 px-2 text-right font-bold text-sm ${f.type === 'income' ? 'text-emerald-600' : 'text-rose-600'}`}>
                     {f.type === 'income' ? '+' : '-'} Rp {f.amount.toLocaleString()}
                   </td>
+                  {user?.role === 'admin' && (
+                    <td className="py-4 px-2 text-right">
+                      {f.status === 'pending' && (
+                        <div className="flex justify-end gap-2">
+                          <button onClick={() => handleStatusUpdate(f.id!, 'rejected')} className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg">
+                            <X className="w-4 h-4" />
+                          </button>
+                          <button onClick={() => handleStatusUpdate(f.id!, 'approved')} className="p-1.5 text-emerald-500 hover:bg-emerald-50 rounded-lg">
+                            <Plus className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
 
-        {totalPages > 1 && (
-          <div className="flex justify-end gap-2 pt-4">
-            <button 
-              disabled={currentPage === 1}
-              onClick={() => setPage(currentPage - 1)}
-              className="px-4 py-2 text-xs font-bold border rounded-lg disabled:opacity-30"
-            >
-              Prev
-            </button>
-            <span className="px-4 py-2 text-xs font-bold text-slate-500">Hal {currentPage} / {totalPages}</span>
-            <button 
-              disabled={currentPage === totalPages}
-              onClick={() => setPage(currentPage + 1)}
-              className="px-4 py-2 text-xs font-bold border rounded-lg disabled:opacity-30"
-            >
-              Next
-            </button>
-          </div>
-        )}
+        <Pagination 
+          totalItems={financials.length}
+          itemsPerPage={itemsPerPage}
+          currentPage={currentPage}
+          onPageChange={setCurrentPage}
+        />
       </div>
     </div>
   );
 };
 
-const LoginContent = ({ setUser, setActiveTab }: { setUser: any; setActiveTab: any; key?: string }) => {
+const LoginContent: React.FC<{ setUser: any; setActiveTab: any }> = ({ setUser, setActiveTab }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -1539,7 +1684,7 @@ const LoginContent = ({ setUser, setActiveTab }: { setUser: any; setActiveTab: a
   );
 };
 
-const RegisterContent = ({ setActiveTab }: { setActiveTab: any; key?: string }) => {
+const RegisterContent: React.FC<{ setActiveTab: any }> = ({ setActiveTab }) => {
   const [formData, setFormData] = useState({ username: '', password: '', name: '', houseNumber: '' });
   const [msg, setMsg] = useState('');
 

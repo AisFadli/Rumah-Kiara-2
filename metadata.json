@@ -5,8 +5,6 @@
     "camera"
   ],
   "majorCapabilities": [
-    "Real-time database",
-    "Social community",
-    "Financial tracking"
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

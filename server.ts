@@ -1,26 +1,81 @@
 import express from 'express';
+import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
+import { google } from 'googleapis';
+import { Readable } from 'stream';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import cookieParser from 'cookie-parser';
-import { google } from 'googleapis';
-import { Readable } from 'stream';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import fileUpload from 'express-fileupload';
+import fs from 'fs';
+import { GoogleGenAI } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+// Ensure uploads directory exists (local fallback)
+const uploadsDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(cookieParser());
+// Utility to normalize image URLs across local, drive, and legacy links
+function normalizeImageUrl(url?: string, driveId?: string): string {
+  if (driveId && typeof driveId === 'string' && driveId.trim()) {
+    return `/api/drive-image/${driveId.trim()}`;
+  }
+  if (!url || typeof url !== 'string' || !url.trim()) return '';
+  let cleaned = url.trim();
 
-  // Google Sheets Auth
+  // If accidentally doubled origin e.g. "https://my-app.run.apphttps://..."
+  const doubleOrigin = cleaned.match(/https?:\/\/[^\/]+(https?:\/\/.+)/);
+  if (doubleOrigin) {
+    cleaned = doubleOrigin[1];
+  }
+
+  // If already an internal path
+  if (cleaned.startsWith('/api/drive-image/') || cleaned.startsWith('/uploads/')) {
+    return cleaned;
+  }
+
+  // If it's a full URL pointing to our internal endpoint
+  const internalDriveMatch = cleaned.match(/\/api\/drive-image\/([a-zA-Z0-9_-]+)/);
+  if (internalDriveMatch) {
+    return `/api/drive-image/${internalDriveMatch[1]}`;
+  }
+
+  const internalUploadMatch = cleaned.match(/\/uploads\/([^/?#]+)/);
+  if (internalUploadMatch) {
+    return `/uploads/${internalUploadMatch[1]}`;
+  }
+
+  // Google Drive LH3 CDN or Drive direct links
+  const lh3Match = cleaned.match(/lh3\.googleusercontent\.com\/d\/([a-zA-Z0-9_-]+)/);
+  if (lh3Match) {
+    return `/api/drive-image/${lh3Match[1]}`;
+  }
+
+  const driveMatch = cleaned.match(/drive\.google\.com\/(?:file\/d\/|uc\?(?:export=view&)?id=)([a-zA-Z0-9_-]+)/);
+  if (driveMatch) {
+    return `/api/drive-image/${driveMatch[1]}`;
+  }
+
+  return cleaned;
+}
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(express.json());
+  app.use(cookieParser());
+  app.use(fileUpload());
+
+  // Serve static files from uploads directory
+  app.use('/uploads', express.static(uploadsDir));
   const getPrivateKey = () => {
     let key = process.env.GOOGLE_PRIVATE_KEY;
     if (!key) return undefined;
@@ -39,95 +94,13 @@ app.use(cookieParser());
     key: getPrivateKey(),
     scopes: [
       'https://www.googleapis.com/auth/spreadsheets',
-      'https://www.googleapis.com/auth/drive.file'
+      'https://www.googleapis.com/auth/drive',
+      'https://www.googleapis.com/auth/drive.file',
+      'https://www.googleapis.com/auth/drive.readonly'
     ],
   });
 
-  const drive = google.drive({ version: 'v3', auth: serviceAccountAuth as any });
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-
-  async function deleteFromDrive(imageUrl: string) {
-    if (!imageUrl || !imageUrl.includes('id=')) return;
-    try {
-      const fileId = imageUrl.split('id=')[1].split('&')[0];
-      await drive.files.delete({ fileId });
-    } catch (error) {
-      console.error('Drive Delete Error:', error);
-    }
-  }
-
-  async function checkImageSafety(base64Data: string): Promise<{ safe: boolean; reason?: string }> {
-    if (!process.env.GEMINI_API_KEY) {
-      console.warn('Safety Check Skipping: GEMINI_API_KEY is not set.');
-      return { safe: true };
-    }
-    try {
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-      const [header, data] = base64Data.split(',');
-      const mime = header.match(/:(.*?);/)?.[1] || 'image/jpeg';
-      
-      const prompt = "Berperanlah sebagai moderator komunitas. Analisis gambar ini. Apakah layak dipublish di portal warga (family-friendly)? Tolak jika ada kekerasan, ketidaksopanan, konten dewasa, atau hal berbahaya. Jawab hanya: 'AMAN' atau 'TOLAK: [alasan singkat dalam Bahasa Indonesia]'.";
-      const result = await model.generateContent([
-        prompt,
-        { inlineData: { data, mimeType: mime } }
-      ]);
-      const text = result.response.text().trim();
-      if (text.toUpperCase().startsWith('AMAN')) return { safe: true };
-      return { safe: false, reason: text.replace('TOLAK:', '').replace('REJECT:', '').trim() };
-    } catch (error: any) {
-      console.error('Safety Check Error:', error.message);
-      if (error.message?.includes('API key not valid')) {
-        console.error('CRITICAL: GEMINI_API_KEY is invalid. Please check your AI Studio settings.');
-      }
-      return { safe: true }; // Fallback to allow if AI check fails
-    }
-  }
-
-  async function uploadToDrive(base64Data: string, fileName: string) {
-    if (!base64Data || !base64Data.startsWith('data:')) return base64Data;
-
-    try {
-      const [header, data] = base64Data.split(',');
-      const mime = header.match(/:(.*?);/)?.[1] || 'image/jpeg';
-      const buffer = Buffer.from(data, 'base64');
-      
-      const stream = new Readable();
-      stream.push(buffer);
-      stream.push(null);
-
-      const response = await drive.files.create({
-        requestBody: {
-          name: fileName,
-          parents: [process.env.GOOGLE_DRIVE_FOLDER_ID || ''],
-        },
-        media: {
-          mimeType: mime,
-          body: stream,
-        },
-        fields: 'id',
-      });
-
-      const fileId = response.data.id;
-      
-      await drive.permissions.create({
-        fileId: fileId!,
-        requestBody: {
-          role: 'reader',
-          type: 'anyone',
-        },
-      });
-
-      return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`;
-    } catch (error: any) {
-      console.error('Drive Upload Error:', error.message);
-      if (error.message?.includes('Google Drive API has not been used')) {
-        console.error('CRITICAL: Google Drive API is disabled. Please enable it in the Google Cloud Console: https://console.cloud.google.com/apis/library/drive.googleapis.com');
-      }
-      return '';
-    }
-  }
-
-
+  const drive = google.drive({ version: 'v3', auth: serviceAccountAuth });
 
   const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID || '', serviceAccountAuth);
 
@@ -181,14 +154,18 @@ app.use(cookieParser());
       const validPassword = await bcrypt.compare(password, userRow.get('password'));
       if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
 
-      const token = jwt.sign({ 
+      const userData = { 
         username: userRow.get('username'),
         name: userRow.get('name'),
-        role: userRow.get('role') 
-      }, process.env.JWT_SECRET || 'secret');
+        role: userRow.get('role'),
+        houseNumber: userRow.get('houseNumber'),
+        profilePic: userRow.get('profilePic') || ''
+      };
+
+      const token = jwt.sign(userData, process.env.JWT_SECRET || 'secret');
 
       res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none' });
-      res.json({ name: userRow.get('name'), role: userRow.get('role'), username: userRow.get('username') });
+      res.json(userData);
     } catch (e: any) {
       console.error('Login Error:', e);
       res.status(500).json({ error: e.message });
@@ -214,6 +191,7 @@ app.use(cookieParser());
         role: 'resident',
         status: 'pending',
         pendingPassword: '',
+        profilePic: '',
         createdAt: new Date().toISOString()
       });
 
@@ -253,35 +231,133 @@ app.use(cookieParser());
     if (!token) return res.json(null);
     jwt.verify(token, process.env.JWT_SECRET || 'secret', (err: any, user: any) => {
       if (err) return res.json(null);
+      if (user && user.profilePic) {
+        user.profilePic = normalizeImageUrl(user.profilePic);
+      }
       res.json(user);
     });
   });
 
-  app.get('/api/posts', async (req, res) => {
+  app.post('/api/auth/profile', authenticateToken, async (req: any, res) => {
+    const { name, houseNumber, profilePic } = req.body;
     try {
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 5;
-      
-      const postsSheet = await getSheet('Posts');
-      const postsRows = await postsSheet.getRows();
-      
-      const usersSheet = await getSheet('Users');
-      const usersRows = await usersSheet.getRows();
-      const userMap = new Map();
-      usersRows.forEach(r => userMap.set(r.get('name'), r.get('avatar')));
+      const sheet = await getSheet('Users');
+      const rows = await sheet.getRows();
+      const userRow = rows.find(r => r.get('username') === req.user.username);
+      if (userRow) {
+        if (name) userRow.set('name', name);
+        if (houseNumber) userRow.set('houseNumber', houseNumber);
+        if (profilePic !== undefined) userRow.set('profilePic', normalizeImageUrl(profilePic));
+        await userRow.save();
+        
+        const updatedUser = {
+          name: userRow.get('name'),
+          username: userRow.get('username'),
+          role: userRow.get('role'),
+          houseNumber: userRow.get('houseNumber'),
+          profilePic: normalizeImageUrl(userRow.get('profilePic') || '')
+        };
+        const token = jwt.sign(updatedUser, process.env.JWT_SECRET || 'secret');
+        res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none' }).json(updatedUser);
+      } else {
+        res.status(404).json({ error: 'User not found' });
+      }
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
 
-      let posts = postsRows.map(r => ({
-        id: r.rowNumber,
-        author: r.get('author'),
-        authorAvatar: userMap.get(r.get('author')) || '',
-        content: r.get('content'),
-        imageUrl: r.get('imageUrl'),
-        likes: parseInt(r.get('likes') || '0'),
-        createdAt: r.get('createdAt'),
-        isPublic: r.get('isPublic') === 'TRUE' || r.get('isPublic') === undefined || r.get('isPublic') === ''
-      })).reverse();
+  app.post('/api/auth/change-password', authenticateToken, async (req: any, res) => {
+    const { currentPassword, newPassword } = req.body;
+    try {
+      const sheet = await getSheet('Users');
+      const rows = await sheet.getRows();
+      const userRow = rows.find(r => r.get('username') === req.user.username);
+      if (userRow) {
+        const isMatch = await bcrypt.compare(currentPassword, userRow.get('password'));
+        if (!isMatch) return res.status(400).json({ error: 'Password saat ini salah' });
+        
+        const hashed = await bcrypt.hash(newPassword, 10);
+        userRow.set('password', hashed);
+        await userRow.save();
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ error: 'User not found' });
+      }
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
 
-      // Robust auth check for public/resident visibility
+  // Direct streaming of Google Drive images to browser
+  app.get('/api/drive-image/:id', async (req, res) => {
+    try {
+      const fileId = req.params.id;
+      if (!fileId) return res.status(400).send('Missing file ID');
+
+      try {
+        const meta = await drive.files.get({
+          fileId,
+          fields: 'mimeType, name, size'
+        });
+        if (meta.data.mimeType) {
+          res.setHeader('Content-Type', meta.data.mimeType);
+        } else {
+          res.setHeader('Content-Type', 'image/jpeg');
+        }
+      } catch (e) {
+        res.setHeader('Content-Type', 'image/jpeg');
+      }
+
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      const streamRes = await drive.files.get(
+        { fileId, alt: 'media' },
+        { responseType: 'stream' }
+      );
+
+      streamRes.data.on('error', (err: any) => {
+        console.error('Drive stream error:', err?.message || err);
+        if (!res.headersSent) res.status(500).end();
+      });
+
+      streamRes.data.pipe(res);
+    } catch (err: any) {
+      console.error('Drive image error:', err?.message || err);
+      res.status(404).send('Image not found');
+    }
+  });
+
+  // AI Content Safety Check API (Gemini server-side)
+  app.post('/api/check-safety', async (req, res) => {
+    const { content, mediaUrl } = req.body;
+    try {
+      if (!process.env.GEMINI_API_KEY) {
+        return res.json({ safe: true });
+      }
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: `Analyze this social media post for a residential cluster community. 
+Content: ${content || ''}
+Media URL: ${mediaUrl || 'None'}
+
+Is this appropriate? Avoid hate speech, explicit content, or illegal activities. 
+Respond ONLY in JSON format: {"safe": true/false, "reason": "short explanation if unsafe"}`,
+        config: {
+          responseMimeType: 'application/json'
+        }
+      });
+      const text = response.text || '{}';
+      const data = JSON.parse(text);
+      res.json({ safe: data.safe ?? true, reason: data.reason });
+    } catch (e: any) {
+      console.error('Safety check error:', e?.message || e);
+      res.json({ safe: true });
+    }
+  });
+
+  // Feed / Posts
+  app.get('/api/posts', async (req: any, res) => {
+    try {
+      const sheet = await getSheet('Posts');
+      const rows = await sheet.getRows();
+      
       const token = req.cookies.token;
       let isResident = false;
       if (token) {
@@ -291,56 +367,58 @@ app.use(cookieParser());
         } catch (e) {}
       }
 
-      if (!isResident) {
-        posts = posts.filter(p => p.isPublic);
-      }
-
-      const total = posts.length;
-      const paginatedPosts = posts.slice((page - 1) * limit, page * limit);
-
-      res.json({
-        posts: paginatedPosts,
-        total,
-        page,
-        totalPages: Math.ceil(total / limit)
+      const posts = rows.map(r => {
+        const driveId = r.get('driveId') || '';
+        const rawImageUrl = r.get('imageUrl') || '';
+        const rawProfilePic = r.get('authorProfilePic') || '';
+        return {
+          id: r.rowNumber,
+          author: r.get('author'),
+          authorProfilePic: normalizeImageUrl(rawProfilePic),
+          content: r.get('content'),
+          imageUrl: normalizeImageUrl(rawImageUrl, driveId),
+          driveId: driveId,
+          likes: parseInt(r.get('likes') || '0'),
+          visibility: r.get('visibility') || 'public',
+          createdAt: r.get('createdAt')
+        };
       });
+
+      const filteredPosts = posts.filter(p => p.visibility === 'public' || isResident);
+      res.json(filteredPosts.reverse());
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   app.post('/api/posts', authenticateToken, async (req: any, res) => {
-    let { content, imageUrl, isPublic } = req.body;
+    const { content, imageUrl, driveId, visibility = 'public' } = req.body;
     try {
-      if (imageUrl && imageUrl.startsWith('data:')) {
-        const safety = await checkImageSafety(imageUrl);
-        if (!safety.safe) {
-          return res.status(400).json({ error: `Konten ditolak AI: ${safety.reason}` });
-        }
-        imageUrl = await uploadToDrive(imageUrl, `post_${Date.now()}.jpg`);
-      }
-      
       const sheet = await getSheet('Posts');
+      const finalImageUrl = normalizeImageUrl(imageUrl, driveId);
       await sheet.addRow({
         author: req.user.name,
+        authorProfilePic: normalizeImageUrl(req.user.profilePic || ''),
         content,
-        imageUrl: imageUrl || '',
-        likes: 0,
-        createdAt: new Date().toISOString(),
-        isPublic: isPublic ? 'TRUE' : 'FALSE'
+        imageUrl: finalImageUrl || '',
+        driveId: driveId || '',
+        likes: '0',
+        visibility,
+        createdAt: new Date().toISOString()
       });
       res.json({ success: true });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   app.delete('/api/posts/:id', authenticateToken, async (req: any, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     try {
+      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
       const sheet = await getSheet('Posts');
       const rows = await sheet.getRows();
-      // Find by rowNumber
       const row = rows.find(r => r.rowNumber === parseInt(req.params.id));
       if (row) {
-        const img = row.get('imageUrl');
-        if (img) await deleteFromDrive(img);
+        const driveId = row.get('driveId');
+        if (driveId) {
+          try { await drive.files.delete({ fileId: driveId }); } catch (de) {}
+        }
         await row.delete();
         res.json({ success: true });
       } else {
@@ -350,101 +428,70 @@ app.use(cookieParser());
   });
 
   // Financials
-  app.get('/api/financials', authenticateToken, async (req, res) => {
+  app.get('/api/financials', authenticateToken, async (req: any, res) => {
     try {
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 10;
-      const showPending = req.query.pending === 'true' && (req as any).user.role === 'admin';
-
       const sheet = await getSheet('Financials');
       const rows = await sheet.getRows();
-      
-      const data = rows
-        .map(r => ({
-          id: r.rowNumber,
-          type: r.get('type'), // income/expense
-          category: r.get('category'),
-          amount: parseFloat(r.get('amount')),
-          date: r.get('date'),
-          description: r.get('description'),
-          addedBy: r.get('addedBy'),
-          attachment: r.get('attachment') || '',
-          status: r.get('status') || 'approved'
-        }))
-        .filter(f => showPending ? f.status === 'pending' : f.status === 'approved')
-        .reverse();
+      const financials = rows.map(r => ({
+        id: r.rowNumber,
+        type: r.get('type'), // income/expense
+        category: r.get('category'),
+        amount: parseFloat(r.get('amount')),
+        date: r.get('date'),
+        description: r.get('description'),
+        addedBy: r.get('addedBy'),
+        proofUrl: normalizeImageUrl(r.get('proofUrl') || ''),
+        status: r.get('status') || 'approved',
+        submittedBy: r.get('submittedBy') || ''
+      }));
 
-      const total = data.length;
-      const paginated = data.slice((page - 1) * limit, page * limit);
-
-      res.json({
-        financials: paginated,
-        total,
-        page,
-        totalPages: Math.ceil(total / limit)
-      });
+      // If admin, show all. If resident, show all approved + their own pending/rejected
+      if (req.user.role === 'admin') {
+        res.json(financials.reverse());
+      } else {
+        const filtered = financials.filter(f => f.status === 'approved' || f.submittedBy === req.user.username);
+        res.json(filtered.reverse());
+      }
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   app.post('/api/financials', authenticateToken, async (req: any, res) => {
-    let { type, category, amount, description, date, attachment } = req.body;
+    const { type, category, amount, description, date, proofUrl } = req.body;
     try {
       const sheet = await getSheet('Financials');
-      const isPending = req.user.role === 'resident';
-
-      if (attachment && attachment.startsWith('data:')) {
-        const safety = await checkImageSafety(attachment);
-        if (!safety.safe) return res.status(400).json({ error: `Bukti ditolak: ${safety.reason}` });
-        attachment = await uploadToDrive(attachment, `receipt_${Date.now()}.jpg`);
-      }
-
       await sheet.addRow({
         type,
         category,
-        amount,
-        description,
+        amount: amount.toString(),
+        description: description || '',
         date: date || new Date().toISOString().split('T')[0],
         addedBy: req.user.name,
-        attachment: attachment || '',
-        status: isPending ? 'pending' : 'approved'
+        proofUrl: proofUrl || '',
+        status: req.user.role === 'admin' ? 'approved' : 'pending',
+        submittedBy: req.user.username
       });
-      res.json({ success: true, pending: isPending });
+      res.json({ success: true });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  app.put('/api/admin/financials/:id/approve', authenticateToken, async (req: any, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  app.post('/api/admin/financials/status', authenticateToken, async (req: any, res) => {
+    const { id, status } = req.body;
     try {
+      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
       const sheet = await getSheet('Financials');
       const rows = await sheet.getRows();
-      const row = rows.find(r => r.rowNumber === parseInt(req.params.id));
+      const row = rows.find(r => r.rowNumber === id);
       if (row) {
-        row.set('status', 'approved');
+        row.set('status', status);
         await row.save();
         res.json({ success: true });
       } else {
-        res.status(404).json({ error: 'Data not found' });
+        res.status(404).json({ error: 'Record not found' });
       }
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  app.delete('/api/admin/financials/:id', authenticateToken, async (req: any, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-    try {
-      const sheet = await getSheet('Financials');
-      const rows = await sheet.getRows();
-      const row = rows.find(r => r.rowNumber === parseInt(req.params.id));
-      if (row) {
-        const att = row.get('attachment');
-        if (att) await deleteFromDrive(att);
-        await row.delete();
-        res.json({ success: true });
-      } else {
-        res.status(404).json({ error: 'Data not found' });
-      }
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
-  });
-
+  // Activities
   app.get('/api/activities', async (req, res) => {
     try {
       const sheet = await getSheet('Activities');
@@ -462,7 +509,6 @@ app.use(cookieParser());
   });
 
   app.post('/api/activities', authenticateToken, async (req: any, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     const { title, description, date, location, pic, phone } = req.body;
     try {
       const sheet = await getSheet('Activities');
@@ -471,16 +517,18 @@ app.use(cookieParser());
         description,
         date,
         location,
-        pic,
-        phone
+        pic: pic || '',
+        phone: phone || '',
+        addedBy: req.user.name,
+        createdAt: new Date().toISOString()
       });
       res.json({ success: true });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   app.delete('/api/activities/:id', authenticateToken, async (req: any, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     try {
+      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Unauthorized' });
       const sheet = await getSheet('Activities');
       const rows = await sheet.getRows();
       const row = rows.find(r => r.rowNumber === parseInt(req.params.id));
@@ -538,81 +586,6 @@ app.use(cookieParser());
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // Resident Directory
-  app.get('/api/residents', async (req, res) => {
-    try {
-      const sheet = await getSheet('Users');
-      const rows = await sheet.getRows();
-      res.json(rows
-        .filter(r => r.get('status') === 'approved')
-        .map(r => ({
-          name: r.get('name'),
-          houseNumber: r.get('houseNumber'),
-          avatar: r.get('avatar') || '',
-          role: r.get('role')
-        })));
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
-  });
-
-  // Profile Management
-  app.get('/api/profile', authenticateToken, async (req: any, res) => {
-    try {
-      const sheet = await getSheet('Users');
-      const rows = await sheet.getRows();
-      const userRow = rows.find(r => r.get('username') === req.user.username);
-      if (!userRow) return res.status(404).json({ error: 'User not found' });
-      
-      res.json({
-        username: userRow.get('username'),
-        name: userRow.get('name'),
-        houseNumber: userRow.get('houseNumber'),
-        avatar: userRow.get('avatar') || '',
-        role: userRow.get('role')
-      });
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
-  });
-
-  app.put('/api/profile', authenticateToken, async (req: any, res) => {
-    let { name, houseNumber, avatar, password } = req.body;
-    try {
-      const sheet = await getSheet('Users');
-      const rows = await sheet.getRows();
-      const userRow = rows.find(r => r.get('username') === req.user.username);
-      if (!userRow) return res.status(404).json({ error: 'User not found' });
-
-      if (avatar && avatar.startsWith('data:')) {
-        // Delete old avatar if it exists
-        const oldAvatar = userRow.get('avatar');
-        if (oldAvatar) await deleteFromDrive(oldAvatar);
-        
-        const safety = await checkImageSafety(avatar);
-        if (!safety.safe) return res.status(400).json({ error: `Avatar ditolak: ${safety.reason}` });
-        
-        avatar = await uploadToDrive(avatar, `avatar_${req.user.username}.jpg`);
-      }
-
-      if (name) userRow.set('name', name);
-      if (houseNumber) userRow.set('houseNumber', houseNumber);
-      if (avatar) userRow.set('avatar', avatar);
-      if (password) {
-        const hashedPassword = await bcrypt.hash(password, 10);
-        userRow.set('password', hashedPassword);
-      }
-
-      await userRow.save();
-      
-      // Update token if name changed
-      const token = jwt.sign({ 
-        username: userRow.get('username'),
-        name: userRow.get('name'),
-        role: userRow.get('role') 
-      }, process.env.JWT_SECRET || 'secret');
-
-      res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none' });
-      res.json({ success: true, name: userRow.get('name'), avatar: userRow.get('avatar') });
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
-  });
-
   // Admin: Get Users
   app.get('/api/admin/users', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
@@ -625,7 +598,7 @@ app.use(cookieParser());
         houseNumber: r.get('houseNumber'),
         status: r.get('status'),
         role: r.get('role'),
-        avatar: r.get('avatar') || '',
+        profilePic: normalizeImageUrl(r.get('profilePic') || ''),
         createdAt: r.get('createdAt')
       })));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -656,6 +629,79 @@ app.use(cookieParser());
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // File Upload to Google Drive (with local fallback)
+  app.post('/api/upload', authenticateToken, async (req: any, res) => {
+    try {
+      if (!req.files || Object.keys(req.files).length === 0) {
+        return res.status(400).json({ error: 'No files were uploaded.' });
+      }
+
+      const file = req.files.file;
+      if (!file) {
+        return res.status(400).json({ error: 'Missing "file" field in upload.' });
+      }
+
+      const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+
+      if (folderId) {
+        try {
+          // Upload to Google Drive
+          const bufferStream = new Readable();
+          bufferStream.push(file.data);
+          bufferStream.push(null);
+
+          const response = await drive.files.create({
+            requestBody: {
+              name: `${Date.now()}-${file.name}`,
+              parents: [folderId],
+            },
+            media: {
+              mimeType: file.mimetype,
+              body: bufferStream,
+            },
+            fields: 'id, webViewLink, webContentLink',
+          });
+
+          // Make file public if possible
+          try {
+            await drive.permissions.create({
+              fileId: response.data.id!,
+              requestBody: {
+                role: 'reader',
+                type: 'anyone',
+              },
+            });
+          } catch (permError) {
+            console.warn('Could not set public permissions on Drive file:', permError);
+          }
+
+          const fileId = response.data.id!;
+          // Streamable proxy endpoint that works for any viewer
+          const publicUrl = `/api/drive-image/${fileId}`;
+          return res.json({ url: publicUrl, driveId: fileId });
+        } catch (e: any) {
+          console.error('Google Drive Upload Error:', e);
+          // Fallback to local if drive fails
+        }
+      }
+
+      // Local Fallback (if no Folder ID or if Drive upload fails)
+      const fileName = `${Date.now()}-${file.name}`;
+      const uploadPath = path.join(uploadsDir, fileName);
+
+      file.mv(uploadPath, (err: any) => {
+        if (err) {
+          console.error('Local Upload MV Error:', err);
+          return res.status(500).json({ error: 'Failed to save file locally.', detail: err.message || err });
+        }
+        res.json({ url: `/uploads/${fileName}` });
+      });
+    } catch (error: any) {
+      console.error('Upload route error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Public Stats
   app.get('/api/stats', async (req, res) => {
     try {
@@ -670,8 +716,7 @@ app.use(cookieParser());
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer } = await import('vite');
-    const vite = await createServer({
+    const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
@@ -684,10 +729,15 @@ app.use(cookieParser());
     });
   }
 
-  if (!process.env.VERCEL) {
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-    });
-  }
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
 
-export default app;
+  // Error logging middleware
+  app.use((err: any, req: any, res: any, next: any) => {
+    console.error('Unhandled Server Error:', err);
+    res.status(500).json({ error: 'Internal Server Error', detail: err.message });
+  });
+}
+
+startServer();
