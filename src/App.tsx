@@ -832,7 +832,7 @@ const FeedContent: React.FC<{ posts: Post[]; user: User | null; setPosts: any; t
 
       const data = await res.json();
       if (data.url) {
-        setMediaUrl(data.url.startsWith('http') ? data.url : `${window.location.origin}${data.url}`);
+        setMediaUrl(window.location.origin + data.url);
       }
     } catch (error: any) {
       console.error('Upload failed', error);
@@ -1048,7 +1048,7 @@ const ProfileContent: React.FC<{ user: User | null; setUser: (u: User | null) =>
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: formData });
       const data = await res.json();
-      if (data.url) setProfilePic(data.url.startsWith('http') ? data.url : `${window.location.origin}${data.url}`);
+      if (data.url) setProfilePic(window.location.origin + data.url);
     } catch (err) {
       console.error(err);
     } finally {
@@ -1420,7 +1420,7 @@ const DashboardContent: React.FC<{ user: User | null; financials: Financial[]; s
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: fd });
       const data = await res.json();
-      if (data.url) setFormData({ ...formData, proofUrl: data.url.startsWith('http') ? data.url : `${window.location.origin}${data.url}` });
+      if (data.url) setFormData({ ...formData, proofUrl: window.location.origin + data.url });
     } catch (err) { console.error(err); }
     finally { setIsUploading(false); }
   };

@@ -294,7 +294,7 @@ async function startServer() {
       if (row) {
         const driveId = row.get('driveId');
         if (driveId) {
-          try { await drive.files.delete({ fileId: driveId, supportsAllDrives: true } as any); } catch (de) {}
+          try { await drive.files.delete({ fileId: driveId }); } catch (de) {}
         }
         await row.delete();
         res.json({ success: true });
@@ -506,7 +506,7 @@ async function startServer() {
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // File Upload to Google Drive (with reliable local fallback)
+  // File Upload to Google Drive (with local fallback)
   app.post('/api/upload', authenticateToken, async (req: any, res) => {
     try {
       if (!req.files || Object.keys(req.files).length === 0) {
@@ -522,7 +522,7 @@ async function startServer() {
 
       if (folderId) {
         try {
-          // Attempt upload to Google Drive (supported for Shared Drives or accounts with storage quota)
+          // Upload to Google Drive
           const bufferStream = new Readable();
           bufferStream.push(file.data);
           bufferStream.push(null);
@@ -537,38 +537,33 @@ async function startServer() {
               body: bufferStream,
             },
             fields: 'id, webViewLink, webContentLink',
-            supportsAllDrives: true,
-            supportsTeamDrives: true,
-          } as any);
+          });
 
-          // Make file public if possible
-          if (response.data.id) {
-            try {
-              await drive.permissions.create({
-                fileId: response.data.id,
-                requestBody: {
-                  role: 'reader',
-                  type: 'anyone',
-                },
-                supportsAllDrives: true,
-              } as any);
-            } catch (permError) {
-              console.warn('Could not set public permissions on Drive file:', permError);
-            }
-
-            const fileId = response.data.id;
-            const publicUrl = `https://lh3.googleusercontent.com/d/${fileId}=s0`;
-            return res.json({ url: publicUrl, driveId: fileId });
+          // Make file public if possible (may fail based on drive settings)
+          try {
+            await drive.permissions.create({
+              fileId: response.data.id!,
+              requestBody: {
+                role: 'reader',
+                type: 'anyone',
+              },
+            });
+          } catch (permError) {
+            console.warn('Could not set public permissions on Drive file:', permError);
           }
+
+          // Return a direct-ish link if it's an image
+          const fileId = response.data.id;
+          const publicUrl = `https://lh3.googleusercontent.com/d/${fileId}=s0`;
+          return res.json({ url: publicUrl, driveId: fileId });
         } catch (e: any) {
-          console.warn('Google Drive Upload not available (using local storage fallback):', e.message || e);
-          // Seamlessly proceed to local fallback below
+          console.error('Google Drive Upload Error:', e);
+          // Fallback to local if drive fails
         }
       }
 
       // Local Fallback (if no Folder ID or if Drive upload fails)
-      const cleanName = (file.name || 'file').replace(/[^a-zA-Z0-9.-]/g, '_');
-      const fileName = `${Date.now()}-${cleanName}`;
+      const fileName = `${Date.now()}-${file.name}`;
       const uploadPath = path.join(uploadsDir, fileName);
 
       file.mv(uploadPath, (err: any) => {
